@@ -1,7 +1,5 @@
 <?php
-define('BOT_TOKEN', 'MY_TELEGRAM_TOKEN');
-
-define('WEBHOOK_URL', 'https://www.yourdomain.it/telegram/bot.php');
+include "config.php";
 
 function setWebhook($url) {
     $api_url = 'https://api.telegram.org/bot' . BOT_TOKEN . '/setWebhook';
