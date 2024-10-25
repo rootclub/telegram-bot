@@ -22,6 +22,7 @@ function initDatabase() {
         pappatoia INTEGER,
         ordinante INTEGER,
         ritirante INTEGER,
+        chiuso INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (pappatoia) REFERENCES pappatoie(id)
     )");
     $db->exec("CREATE TABLE IF NOT EXISTS elementi_ordini (
@@ -209,6 +210,8 @@ function processMessage($message) {
     } elseif (strpos($text, '/ordina') === 0) {
         $response = _ordina($text, $chatID);
         
+    } elseif ($text == '/chiudi_ordine') {
+        $response = _chiudi_ordine($fromId, $userName);
     } elseif ($text == '/ritiro' || $text == '/ritiro@rootbotbot') {
         $response = _ritiro($fromId, $userName);
         
@@ -392,10 +395,14 @@ function _mangerei($text, $userId, $userName, $chatID) {
     $item = $parts[1];
     
     // Verifica se esiste un ordine attivo per oggi
-    $stmt = $db->prepare("SELECT id, ordinante, ritirante, pappatoia FROM ordini WHERE date(data) = date('now') LIMIT 1");
+    $stmt = $db->prepare("SELECT id, ordinante, ritirante, pappatoia, chiuso FROM ordini WHERE date(data) = date('now') LIMIT 1");
     $result = $stmt->execute();
     $row = $result->fetchArray(SQLITE3_ASSOC);
-    
+
+    if($row['chiuso'] == 1) {
+        return "L'ordine di oggi è già stato chiuso. Non è più possibile ordinare pietanze.";
+    }
+
     if (!$row) {
         // Crea un nuovo ordine per oggi
         $stmt = $db->prepare("INSERT INTO ordini (data) VALUES (date('now'))");
@@ -563,6 +570,8 @@ function _lista() {
         } else {
             $response .= "🍽 Nessun asporto selezionato. Usa /asporto per selezionarne uno.\n\n";
         }
+
+        // TODO: aggiungere comando per ordinare per conto di qualcun altro, attivabile solo da amministratori del gruppo. /mangerebbe {CHI} {COSA}
         
         if ($ordine['ordinante']) {
             $response .= "🛒 Ordina: {$ordine['ordinante']}\n";
@@ -592,7 +601,7 @@ function _ordino($userId, $userName) {
     global $db;
     
     // Verifica se esiste un ordine attivo per oggi
-    $stmt = $db->prepare("SELECT id, ordinante FROM ordini WHERE date(data) = date('now') LIMIT 1");
+    $stmt = $db->prepare("SELECT id, ordinante, chiuso FROM ordini WHERE date(data) = date('now') LIMIT 1");
     $result = $stmt->execute();
     $row = $result->fetchArray(SQLITE3_ASSOC);
     
@@ -601,8 +610,12 @@ function _ordino($userId, $userName) {
         $stmt = $db->prepare("INSERT INTO ordini (data, ordinante) VALUES (date('now'), :userName)");
         $stmt->bindValue(':userName', $userName, SQLITE3_TEXT);
         $stmt->execute();
-        return "Grazie per esserti offerto per telefonare all'asporto designato e piazzare l'ordine di oggi.";
+        return "Grazie per esserti offerto per telefonare all'asporto designato e piazzare l'ordine di oggi. Ricordati di chiudere l'ordine con /chiudi_ordine prima di ordinare.";
     } else {
+        if($row['chiuso'] == 1) {
+            return "L'ordine di oggi è già stato chiuso. Non è più possibile offrirsi di ordinare.";
+        }
+
         $orderId = $row['id'];
         $currentOrdinante = $row['ordinante'];
         
@@ -673,6 +686,28 @@ function is_valid_phone_number($phone) {
     }
     
     return true;
+}
+
+function _chiudi_ordine($userId, $username) {
+    global $db;
+
+    // Verifica se esiste un ordine attivo per oggi
+    $stmt = $db->prepare("SELECT id FROM ordini WHERE date(data) = date('now') AND chiuso = 0 LIMIT 1");
+    $result = $stmt->execute();
+    $row = $result->fetchArray(SQLITE3_ASSOC);
+
+    if (!$row) {
+        return "Non c'è un ordine attivo per oggi.";
+    }
+
+    $orderId = $row['id'];
+
+    // Aggiorna lo stato dell'ordine a "chiuso"
+    $stmt = $db->prepare("UPDATE ordini SET chiuso = 1 WHERE id = :orderId");
+    $stmt->bindValue(':orderId', $orderId, SQLITE3_INTEGER);
+    $stmt->execute();
+
+    return "L'ordine di oggi è stato chiuso. Non sarà più possibile ordinare pietanze.";
 }
 
 function nuova_pappatoia($chat_id, $message_id, $text) {
