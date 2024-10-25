@@ -707,7 +707,7 @@ function _chiudi_ordine($userId, $username) {
     $stmt->bindValue(':orderId', $orderId, SQLITE3_INTEGER);
     $stmt->execute();
 
-    return "L'ordine di oggi è stato chiuso. Non sarà più possibile ordinare pietanze.";
+    return "L'ordine di oggi è stato chiuso. Da questo momento non è più possibile ordinare pietanze.";
 }
 
 function nuova_pappatoia($chat_id, $message_id, $text) {
