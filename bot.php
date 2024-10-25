@@ -516,7 +516,7 @@ function gestisci_selezione_pappatoia($callbackQuery) {
 function _lista() {
     global $db;
     $stmt = $db->prepare("
-        SELECT o.id, o.ordinante, o.ritirante, o.pappatoia, 
+        SELECT o.id, o.data, o.ordinante, o.ritirante, o.pappatoia, 
                e.utente, e.descrizione, 
                p.pappatoia as nome_pappatoia, p.indirizzo, p.telefono
         FROM ordini o 
@@ -533,6 +533,7 @@ function _lista() {
         if ($ordine === null) {
             $ordine = [
                 'id' => $row['id'],
+                'data' => $row['data'],
                 'ordinante' => $row['ordinante'],
                 'ritirante' => $row['ritirante'],
                 'pappatoia' => $row['nome_pappatoia'],
@@ -548,7 +549,10 @@ function _lista() {
     if ($ordine === null) {
         return "Non c'è un ordine in corso al momento, creane uno con il comando /mangerei seguito dalla pietanza desiderata.";
     } else {
-        $response = "Ordine di oggi:\n\n";
+        $data_formattata = DateTime::createFromFormat('Y-m-d', $ordine['data'])
+                                    ->format('d/m/Y');
+
+        $response = "Ordine di oggi {$data_formattata}:\n\n";
         
         if ($ordine['pappatoia']) {
             $response .= "🍽 Asporto: {$ordine['pappatoia']}\n";
