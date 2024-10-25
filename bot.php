@@ -180,6 +180,7 @@ function processMessage($message) {
     $chatType = $message['chat']['type'];
     $fromId = $message['from']['id'];
     $firstName = $message['from']['first_name'] ?? 'Utente';
+    $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
     $response = null;
 
 
@@ -197,21 +198,18 @@ function processMessage($message) {
         $response = _regole();
         
     } elseif (strpos($text, '/mangerei') === 0) {
-        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
         $response = _mangerei($text, $fromId, $userName, $chatID);
         
     } elseif ($text == '/lista' || $text == '/lista@rootbotbot') {
         $response = _lista();
         
     } elseif ($text == '/ordino' || $text == '/ordino@rootbotbot') {
-        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
         $response = _ordino($fromId, $userName);
         
     } elseif (strpos($text, '/ordina') === 0) {
         $response = _ordina($text, $chatID);
         
     } elseif ($text == '/ritiro' || $text == '/ritiro@rootbotbot') {
-        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
         $response = _ritiro($fromId, $userName);
         
     } elseif (strpos($text, '/ritira') === 0) {
@@ -233,7 +231,6 @@ function processMessage($message) {
         $response = finish_adding_images($chatID);
         
     } elseif ($text == '/annullo' || $text == '/annullo@rootbotbot') {
-        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
         $response = _annullo($fromId, $userName);
         
     } elseif (isset($message['photo'])) {
