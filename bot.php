@@ -22,7 +22,6 @@ function initDatabase() {
         pappatoia INTEGER,
         ordinante INTEGER,
         ritirante INTEGER,
-        chiuso INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (pappatoia) REFERENCES pappatoie(id)
     )");
     $db->exec("CREATE TABLE IF NOT EXISTS elementi_ordini (
@@ -32,6 +31,22 @@ function initDatabase() {
         descrizione TEXT,
         FOREIGN KEY (id_ordine) REFERENCES ordini(id)
     )");
+    $stmt = $db->prepare("PRAGMA table_info(ordini);");
+    $result = $stmt->execute();
+    $chiusoColumnExists = false;
+
+    while(!$chiusoColumnExists && $row = $result->fetchArray(SQLITE3_ASSOC)) {
+        if($row[0] == 'chiuso') {
+            $chiusoColumnExists = true;
+            break;
+        }
+    }
+
+    if(!$chiusoColumnExists) {
+        $db->exec("ALTER TABLE ordini
+            ADD chiuso INTEGER NOT NULL DEFAULT 0
+        ");
+    }
 }
 
 initDatabase();
