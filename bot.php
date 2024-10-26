@@ -33,16 +33,16 @@ function initDatabase() {
     )");
     $stmt = $db->prepare("PRAGMA table_info(ordini);");
     $result = $stmt->execute();
-    $chiusoColumnExists = false;
+    $colonnaChiusoEsiste = false;
 
-    while(!$chiusoColumnExists && $row = $result->fetchArray(SQLITE3_ASSOC)) {
+    while(!$colonnaChiusoEsiste && $row = $result->fetchArray(SQLITE3_ASSOC)) {
         if($row[0] == 'chiuso') {
-            $chiusoColumnExists = true;
+            $colonnaChiusoEsiste = true;
             break;
         }
     }
 
-    if(!$chiusoColumnExists) {
+    if(!$colonnaChiusoEsiste) {
         $db->exec("ALTER TABLE ordini
             ADD chiuso INTEGER NOT NULL DEFAULT 0
         ");
