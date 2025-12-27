@@ -12,21 +12,32 @@ function _help(){
 /info - Informazioni sul gruppo
 /regole - Mostra le regole del gruppo
 @root seguito da un messaggio per parlare con me (è implemetanto sommariamente, usa ollama ma per ora gira sul PC di Lamberto per cui quando il PC è spento il bot non risponde)
-	
+
 Posso aiutare per raccogliere gli ordini per le cene al root, ecco i comandi:
 /mangerei - crea nuovo ordine oppure aggiungi elemento all'ordine odierno
-/annullo - elimini la tua pietanza dall'ordine, se tutti annullano l'ordine viene eliminato
+/mangerebbe - inserisci ordine per un altro utente rispondendo al suo messaggio (solo admin)
+/annullo - elimini la tua pietanza dall'ordine, partecipazione o ospite
 /lista - mostra la lista delle pietanza di cui è composto l'ordine
 /ordino - ti offri per telefonare e piazzare l'ordine presso l'asporto scelto
 /ordina @utente - designi una persona per telefonare e piazzare l'ordine presso l'asporto scelto
 /ritiro - ti offri per ritirare le pietanze presso l'asporto scelto
 /ritira @utente - designi una persona per ritirare le pietanze presso l'asporto scelto
 /elenco_asporto - mostra i locali da asporto predefiniti e permette di consultarne i menù
-/asporto - per scegliere da quale locale da asporto si ordinerà il cibo 
+/asporto - per scegliere da quale locale da asporto si ordinerà il cibo
 /nuovo_asporto - aggiungi un nuovo locale da asporto
 /menu - mostra il menù dell'asporto scelto per l'ordine in corso
 /nuovo_menu - permette di aggiungere o sostituire le immagini del menù (solo per amministratori)
-/elimina_asporto - elimina un locale da asporto dai predefiniti (solo per amministratori)";
+/elimina_asporto - elimina un locale da asporto dai predefiniti (solo per amministratori)
+
+Posso anche gestire eventi speciali (corsi, cene, talk):
+/evento - crea un nuovo evento con descrizione, data/ora e costo (solo admin)
+/partecipo - iscriviti a un evento
+/partecipanti - mostra info evento e la lista dei partecipanti a un evento
+/ospite [nome] - aggiungi un ospite (moglie, figli, ecc.) a un evento
+/annullo - elimini la tua partecipazione o ospite
+/annullo_ospite - rimuovi un ospite che hai aggiunto
+/modifica_evento - modifica descrizione, data/ora o costo di un evento (solo admin)
+/chiudi_evento - elimina un evento concluso (solo admin)";
 }
 
 function _info($chatID, $chatType){

@@ -3,6 +3,99 @@
 ////////////////////// GESTIONE ORDINI /////////////////////////////
 ////////////////////////////////////////////////////////////////////
 
+/**
+ * /mangerebbe - Inserisce un ordine per conto di un altro utente (solo admin, in reply)
+ */
+function _mangerebbe($text, $adminId, $adminName, $chatID, $message) {
+    global $db;
+
+    // Verifica che sia un admin
+    if (!isAdmin($chatID, $adminId)) {
+        return "Solo gli amministratori possono inserire ordini per altri utenti.";
+    }
+
+    // Verifica che sia in reply a un messaggio
+    if (!isset($message['reply_to_message'])) {
+        return "Per usare /mangerebbe devi rispondere a un messaggio dell'utente per cui vuoi ordinare.";
+    }
+
+    $replyTo = $message['reply_to_message'];
+    $targetUserId = $replyTo['from']['id'];
+    $targetUserName = $replyTo['from']['first_name'] . ' ' . ($replyTo['from']['last_name'] ?? '');
+    $targetUserName = trim($targetUserName);
+
+    // Estrai la pietanza dal comando
+    $parts = explode(' ', $text, 2);
+    if (count($parts) < 2 || trim($parts[1]) === '') {
+        return "Uso: rispondi a un messaggio con /mangerebbe seguito dalla pietanza.\nEsempio: /mangerebbe pizza margherita";
+    }
+    $item = trim($parts[1]);
+
+    // Verifica se esiste un ordine attivo per oggi
+    $stmt = $db->prepare("SELECT id, pappatoia FROM ordini WHERE date(data) = date('now') LIMIT 1");
+    $result = $stmt->execute();
+    $row = $result->fetchArray(SQLITE3_ASSOC);
+
+    if (!$row) {
+        // Crea un nuovo ordine per oggi
+        $stmt = $db->prepare("INSERT INTO ordini (data) VALUES (date('now'))");
+        $stmt->execute();
+        $orderId = $db->lastInsertRowID();
+
+        // Aggiungi l'elemento all'ordine
+        $stmt = $db->prepare("INSERT INTO elementi_ordini (id_ordine, utente, user_name, descrizione, delegato_da) VALUES (:orderId, :userId, :userName, :item, :delegatoDa)");
+        $stmt->bindValue(':orderId', $orderId, SQLITE3_INTEGER);
+        $stmt->bindValue(':userId', $targetUserId, SQLITE3_INTEGER);
+        $stmt->bindValue(':userName', $targetUserName, SQLITE3_TEXT);
+        $stmt->bindValue(':item', $item, SQLITE3_TEXT);
+        $stmt->bindValue(':delegatoDa', $adminId, SQLITE3_INTEGER);
+        $stmt->execute();
+
+        return "Ho inserito l'ordine per <b>$targetUserName</b>: $item\n(inserito da $adminName)";
+    } else {
+        $orderId = $row['id'];
+        $pappatoia = $row['pappatoia'];
+
+        // Controlla se l'utente target ha già un ordine per oggi
+        $stmt = $db->prepare("SELECT id FROM elementi_ordini WHERE id_ordine = :orderId AND utente = :userId");
+        $stmt->bindValue(':orderId', $orderId, SQLITE3_INTEGER);
+        $stmt->bindValue(':userId', $targetUserId, SQLITE3_INTEGER);
+        $result = $stmt->execute();
+        $existingOrder = $result->fetchArray(SQLITE3_ASSOC);
+
+        if ($existingOrder) {
+            // Aggiorna l'ordine esistente
+            $stmt = $db->prepare("UPDATE elementi_ordini SET descrizione = :item, delegato_da = :delegatoDa WHERE id = :id");
+            $stmt->bindValue(':item', $item, SQLITE3_TEXT);
+            $stmt->bindValue(':delegatoDa', $adminId, SQLITE3_INTEGER);
+            $stmt->bindValue(':id', $existingOrder['id'], SQLITE3_INTEGER);
+            $stmt->execute();
+            $message = "Ho sostituito l'ordine di <b>$targetUserName</b> con '$item'\n(modificato da $adminName)";
+        } else {
+            // Aggiungi il nuovo elemento
+            $stmt = $db->prepare("INSERT INTO elementi_ordini (id_ordine, utente, user_name, descrizione, delegato_da) VALUES (:orderId, :userId, :userName, :item, :delegatoDa)");
+            $stmt->bindValue(':orderId', $orderId, SQLITE3_INTEGER);
+            $stmt->bindValue(':userId', $targetUserId, SQLITE3_INTEGER);
+            $stmt->bindValue(':userName', $targetUserName, SQLITE3_TEXT);
+            $stmt->bindValue(':item', $item, SQLITE3_TEXT);
+            $stmt->bindValue(':delegatoDa', $adminId, SQLITE3_INTEGER);
+            $stmt->execute();
+            $message = "Ho inserito l'ordine per <b>$targetUserName</b>: $item\n(inserito da $adminName)";
+        }
+
+        // Aggiungi informazioni sulla pappatoia selezionata
+        if ($pappatoia) {
+            $stmt = $db->prepare("SELECT pappatoia FROM pappatoie WHERE id = :pappatoiaId");
+            $stmt->bindValue(':pappatoiaId', $pappatoia, SQLITE3_INTEGER);
+            $result = $stmt->execute();
+            $pappatoiaInfo = $result->fetchArray(SQLITE3_ASSOC);
+            $message .= "\nAsporto selezionato: " . $pappatoiaInfo['pappatoia'];
+        }
+
+        return $message;
+    }
+}
+
 function _mangerei($text, $userId, $userName, $chatID) {
     global $db;
     $parts = explode(' ', $text, 2);

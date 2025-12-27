@@ -62,20 +62,89 @@ function initDatabase() {
         timestamp INTEGER
     )");
 
+    // Tabelle per gestione eventi
+    $db->exec("CREATE TABLE IF NOT EXISTS eventi (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        descrizione TEXT NOT NULL,
+        data_ora DATETIME NOT NULL,
+        costo REAL DEFAULT 0,
+        creatore_id INTEGER,
+        creatore_name TEXT,
+        chat_id INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )");
+
+    $db->exec("CREATE TABLE IF NOT EXISTS partecipanti_eventi (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        evento_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        user_name TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (evento_id) REFERENCES eventi(id) ON DELETE CASCADE,
+        UNIQUE(evento_id, user_id)
+    )");
+
+    $db->exec("CREATE TABLE IF NOT EXISTS ospiti_eventi (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        evento_id INTEGER NOT NULL,
+        invitante_id INTEGER NOT NULL,
+        invitante_name TEXT,
+        nome_ospite TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (evento_id) REFERENCES eventi(id) ON DELETE CASCADE
+    )");
+
+    // Tabella user_states (definita in orders.php ma verifichiamo qui la struttura)
+    $db->exec("CREATE TABLE IF NOT EXISTS user_states (
+        chat_id INTEGER,
+        state TEXT,
+        data TEXT
+    )");
+
+    // Tabella per tracciare news HN già postate dal DJ
+    $db->exec("CREATE TABLE IF NOT EXISTS hn_posted (
+        story_id INTEGER PRIMARY KEY,
+        title TEXT,
+        posted_at INTEGER
+    )");
+    // Pulizia automatica: rimuovi news più vecchie di 7 giorni
+    $weekAgo = time() - (7 * 24 * 3600);
+    $db->exec("DELETE FROM hn_posted WHERE posted_at < $weekAgo");
+
     // Migration: aggiungi colonne se non esistono
+    // Per user_states - aggiungi user_id
+    $result = $db->query("PRAGMA table_info(user_states)");
+    $hasUserId = false;
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        if ($row['name'] == 'user_id') {
+            $hasUserId = true;
+            break;
+        }
+    }
+    if (!$hasUserId) {
+        $db->exec("ALTER TABLE user_states ADD COLUMN user_id INTEGER");
+    }
+
     // Per elementi_ordini
     $result = $db->query("PRAGMA table_info(elementi_ordini)");
     $hasUserName = false;
+    $hasDelegato = false;
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
         if ($row['name'] == 'user_name') {
             $hasUserName = true;
-            break;
+        }
+        if ($row['name'] == 'delegato_da') {
+            $hasDelegato = true;
         }
     }
     if (!$hasUserName) {
         $db->exec("ALTER TABLE elementi_ordini ADD COLUMN user_name TEXT");
         // Migra i dati esistenti dalla colonna utente (che contiene nomi) a user_name
         $db->exec("UPDATE elementi_ordini SET user_name = CAST(utente AS TEXT) WHERE user_name IS NULL");
+    }
+    if (!$hasDelegato) {
+        // Colonna per tracciare chi ha inserito l'ordine per conto di un altro (admin_id)
+        $db->exec("ALTER TABLE elementi_ordini ADD COLUMN delegato_da INTEGER");
     }
 
     // Per ordini - ordinante_name

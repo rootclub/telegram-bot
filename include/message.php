@@ -33,6 +33,35 @@ function processMessage($message) {
     $firstName = $message['from']['first_name'] ?? 'Utente';
     $response = null;
 
+    // Controlla se è un reply a un messaggio del bot
+    $isReplyToBot = false;
+    if (isset($message['reply_to_message']['from']['username']) &&
+        $message['reply_to_message']['from']['username'] === 'rootbotbot') {
+        $isReplyToBot = true;
+    }
+
+    // Gestione input multi-step per eventi
+    $eventResponse = handleEventInput($message);
+    if ($eventResponse !== null) {
+        $result = makeAPIRequest('sendMessage', [
+            'chat_id' => $chatID,
+            'text' => $eventResponse,
+            'parse_mode' => 'HTML',
+            'reply_to_message_id' => $message['message_id']
+        ]);
+        // Se il reply fallisce, riprova senza reply
+        if (!$result || !$result['ok']) {
+            if (isset($result['error_code']) && $result['error_code'] == 400 &&
+                strpos($result['description'], 'message to be replied not found') !== false) {
+                makeAPIRequest('sendMessage', [
+                    'chat_id' => $chatID,
+                    'text' => $eventResponse,
+                    'parse_mode' => 'HTML'
+                ]);
+            }
+        }
+        return;
+    }
 
     //$profanity_response = handle_profanity($message);
     $profanity_response = null;
@@ -57,6 +86,10 @@ function processMessage($message) {
     } elseif ($text == '/regole' || $text == '/regole@rootbotbot') {
         $response = _regole();
         
+    } elseif (strpos($text, '/mangerebbe') === 0) {
+        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
+        $response = _mangerebbe($text, $fromId, $userName, $chatID, $message);
+
     } elseif (strpos($text, '/mangerei') === 0 || strpos($text, '/mangarei') === 0 || strpos($text, '/mangierei') === 0 ) {
         $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
         $response = _mangerei($text, $fromId, $userName, $chatID);
@@ -95,10 +128,35 @@ function processMessage($message) {
         
     } elseif ($text == '/fine' || $text == '/fine@rootbotbot') {
         $response = finish_adding_images($chatID);
-        
+
+    } elseif ($text == '/evento' || $text == '/evento@rootbotbot') {
+        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
+        $response = _evento($chatID, $fromId, $userName, $chatType);
+
+    } elseif ($text == '/partecipo' || $text == '/partecipo@rootbotbot') {
+        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
+        $response = _partecipo($chatID, $fromId, $userName);
+
+    } elseif ($text == '/partecipanti' || $text == '/partecipanti@rootbotbot') {
+        $response = _partecipanti($chatID);
+
+    } elseif ($text == '/modifica_evento' || $text == '/modifica_evento@rootbotbot') {
+        $response = _modifica_evento($chatID, $fromId, $chatType);
+
+    } elseif ($text == '/chiudi_evento' || $text == '/chiudi_evento@rootbotbot') {
+        $response = _chiudi_evento($chatID, $fromId, $chatType);
+
+    } elseif (strpos($text, '/ospite') === 0) {
+        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
+        $response = _ospite($text, $chatID, $fromId, $userName);
+
+    } elseif ($text == '/annullo_ospite' || $text == '/annullo_ospite@rootbotbot') {
+        $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
+        $response = _annullo_ospite($chatID, $fromId, $userName);
+
     } elseif ($text == '/annullo' || $text == '/annullo@rootbotbot') {
         $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
-        $response = _annullo($fromId, $userName);
+        $response = _annullo_smart($chatID, $fromId, $userName);
         
     } elseif (isset($message['photo'])) {
         $response = handle_image($message);
@@ -106,9 +164,69 @@ function processMessage($message) {
     } elseif ($text == '/elimina_asporto') {
         $response = elimina_pappatoia($chatID, $fromId);
         
-    } elseif (preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/@rootbot\b/', $text)) {
+    } elseif (preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/\brootbot\b/i', $text) || $isReplyToBot) {
         $response = _ai($chatID, $chatType, $text);
-    
+
+    } elseif (preg_match('/^\/saluto(?:@rootbotbot)?(?:\s+-(\d+))?$/', $text, $salutoMatches)) {
+        // Comando sperimentale - output in chat privata
+        // Supporta /saluto, /saluto -1 (ieri), /saluto -2 (altroieri), ecc.
+        $daysAgo = isset($salutoMatches[1]) ? (int)$salutoMatches[1] : 0;
+
+        // Lock anti-retry: evita elaborazioni multiple simultanee
+        $lockFile = __DIR__ . '/../saluto.lock';
+        $lockTimeout = 300; // 5 minuti massimo per elaborazione
+
+        if (file_exists($lockFile)) {
+            $lockTime = (int)file_get_contents($lockFile);
+            if (time() - $lockTime < $lockTimeout) {
+                // Richiesta già in elaborazione, ignora silenziosamente
+                return;
+            }
+        }
+
+        // Crea il lock
+        file_put_contents($lockFile, time());
+
+        // Se in chat privata, usa l'ID del gruppo principale per i test
+        $targetGroupId = ($chatType == 'private') ? -1001402757977 : $chatID;
+        $saluto = _saluto($targetGroupId, $daysAgo);
+
+        // Rilascia il lock
+        @unlink($lockFile);
+
+        // Se siamo in privato non serve il fallback, se siamo in gruppo sì
+        $fallbackChatId = ($chatType == 'private') ? null : $chatID;
+        sendPrivateResponse($fromId, $saluto, $fallbackChatId);
+        return; // Nessuna risposta nel gruppo
+
+    } elseif (preg_match('/^\/dj(?:@rootbotbot)?(?:\s+-(\d+))?$/', $text, $djMatches)) {
+        // Comando sperimentale DJ - output in chat privata
+        // Supporta /dj, /dj -1 (1 ora fa), /dj -2 (2 ore fa), ecc.
+        $hoursAgo = isset($djMatches[1]) ? (int)$djMatches[1] : 0;
+
+        // Lock anti-retry
+        $lockFile = __DIR__ . '/../dj.lock';
+        $lockTimeout = 180; // 3 minuti
+
+        if (file_exists($lockFile)) {
+            $lockTime = (int)file_get_contents($lockFile);
+            if (time() - $lockTime < $lockTimeout) {
+                return;
+            }
+        }
+
+        file_put_contents($lockFile, time());
+
+        // Se in chat privata, usa l'ID del gruppo principale
+        $targetGroupId = ($chatType == 'private') ? -1001402757977 : $chatID;
+        $djMessage = _dj($targetGroupId, $hoursAgo);
+
+        @unlink($lockFile);
+
+        $fallbackChatId = ($chatType == 'private') ? null : $chatID;
+        sendPrivateResponse($fromId, $djMessage, $fallbackChatId);
+        return;
+
     } elseif (strpos($text, '/') === 0) {
         $response = "Il comando che hai inserito non lo conosco, controlla meglio cosa hai digitato";
     }
@@ -116,12 +234,24 @@ function processMessage($message) {
 
     // Invia la risposta solo se è stata impostata
     if ($response !== null) {
-        makeAPIRequest('sendMessage', [
+        $result = makeAPIRequest('sendMessage', [
             'chat_id' => $chatID,
             'text' => $response,
             'parse_mode' => 'HTML',
             'reply_to_message_id' => $message['message_id']
         ]);
+
+        // Se il reply fallisce (messaggio originale eliminato), riprova senza reply
+        if (!$result || !$result['ok']) {
+            if (isset($result['error_code']) && $result['error_code'] == 400 &&
+                strpos($result['description'], 'message to be replied not found') !== false) {
+                makeAPIRequest('sendMessage', [
+                    'chat_id' => $chatID,
+                    'text' => $response,
+                    'parse_mode' => 'HTML'
+                ]);
+            }
+        }
     }
 }
 ?>

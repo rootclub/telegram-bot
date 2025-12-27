@@ -28,9 +28,9 @@ function makeAPIRequest($method, $parameters) {
     
     if (!$result['ok']) {
         error_log("API Error: " . print_r($result, true));
-        return false;
+        return $result;  // Ritorna l'array completo per gestire errori specifici
     }
-    
+
     return $result;
 }
 ?>

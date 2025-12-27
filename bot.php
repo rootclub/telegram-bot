@@ -4,10 +4,11 @@ include "include/database.php";
 include "include/api.php";
 include "include/image.php";
 include "include/help.php";
-include "include/message.php";
 include "include/ai.php";
 include "include/moderation.php";
 include "include/orders.php";
+include "include/events.php";
+include "include/message.php";
 
 $db = new SQLite3(DB_FILE);
 
@@ -48,7 +49,8 @@ if (isset($update['message'])) {
 } elseif (isset($update['callback_query'])) {
     $callbackQuery = $update['callback_query'];
     $data = $callbackQuery['data'];
-    
+
+    // Callback ordini/pappatoie
     if (strpos($data, 'seleziona_pappatoia:') === 0) {
         gestisci_selezione_pappatoia($callbackQuery);
     } elseif (strpos($data, 'delete_pappatoia:') === 0) {
@@ -63,6 +65,28 @@ if (isset($update['message'])) {
         handle_select_pappatoia_for_menu($callbackQuery);
     } elseif (strpos($data, 'menu_action:') === 0) {
         handle_menu_action($callbackQuery);
+    }
+    // Callback eventi
+    elseif (strpos($data, 'partecipo_evento:') === 0) {
+        handlePartecipoEvento($callbackQuery);
+    } elseif (strpos($data, 'lista_partecipanti:') === 0) {
+        handleListaPartecipanti($callbackQuery);
+    } elseif (strpos($data, 'annullo_tipo:') === 0) {
+        handleAnnulloTipo($callbackQuery);
+    } elseif (strpos($data, 'modifica_evento_select:') === 0) {
+        handleModificaEventoSelect($callbackQuery);
+    } elseif (strpos($data, 'modifica_campo:') === 0) {
+        handleModificaCampo($callbackQuery);
+    } elseif (strpos($data, 'chiudi_evento_select:') === 0) {
+        handleChiudiEventoSelect($callbackQuery);
+    } elseif (strpos($data, 'conferma_chiudi_evento:') === 0) {
+        handleConfermaChiudiEvento($callbackQuery);
+    } elseif ($data === 'annulla_chiudi_evento') {
+        handleAnnullaChiudiEvento($callbackQuery);
+    } elseif (strpos($data, 'ospite_evento:') === 0) {
+        handleOspiteEvento($callbackQuery);
+    } elseif (strpos($data, 'annullo_ospite:') === 0) {
+        handleAnnulloOspiteCallback($callbackQuery);
     }
 }
 
