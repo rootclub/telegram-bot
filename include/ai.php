@@ -234,7 +234,7 @@ INSTR;
 Rispondi SOLO alla domanda sopra. Il contesto serve solo per capire di cosa si sta parlando, non divagare su altri argomenti menzionati nel contesto.
 PROMPT;
 
-	file_put_contents('ai.log', print_r($prompt, true) . "\n\n", FILE_APPEND);
+	file_put_contents(dirname(__DIR__) . '/ai.log', print_r($prompt, true) . "\n\n", FILE_APPEND);
 
     $data = json_encode([
         'model' => $model,
@@ -284,6 +284,11 @@ PROMPT;
 function _saluto($chatID, $daysAgo = 0) {
     $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
+    $logFile = dirname(__DIR__) . '/ai.log';
+
+    // Log di inizio
+    file_put_contents($logFile, "\n=== SALUTO START " . date('Y-m-d H:i:s') . " ===\n", FILE_APPEND);
+    file_put_contents($logFile, "chatID: $chatID, daysAgo: $daysAgo\n", FILE_APPEND);
 
     // Calcola il range di tempo per il giorno richiesto
     if ($daysAgo > 0) {
@@ -296,8 +301,11 @@ function _saluto($chatID, $daysAgo = 0) {
         $targetDate = new DateTime();
     }
 
+    file_put_contents($logFile, "Context length: " . strlen($context) . " chars\n", FILE_APPEND);
+
     if (empty(trim($context))) {
         $dayLabel = $daysAgo > 0 ? "$daysAgo giorni fa" : "nelle ultime 24 ore";
+        file_put_contents($logFile, "EXIT: contesto vuoto\n", FILE_APPEND);
         return "Nessun messaggio trovato $dayLabel.";
     }
 
@@ -305,7 +313,11 @@ function _saluto($chatID, $daysAgo = 0) {
     $oggi = ucfirst($formatter->format($targetDate));
 
     // Fase 1: Analizza i link condivisi (usa modello leggero)
+    file_put_contents($logFile, "Starting getLinksAnalysis...\n", FILE_APPEND);
+    $startLinks = time();
     $linksAnalysis = getLinksAnalysis($context);
+    $elapsedLinks = time() - $startLinks;
+    file_put_contents($logFile, "getLinksAnalysis completed in {$elapsedLinks}s, result length: " . strlen($linksAnalysis) . "\n", FILE_APPEND);
     $linksSection = '';
     if (!empty($linksAnalysis)) {
         $linksSection = "\n### LINK CONDIVISI E LORO CONTENUTO ###\n{$linksAnalysis}\n";
@@ -332,7 +344,8 @@ Oggi è {$oggi}.
 Un messaggio discorsivo di 10-15 frasi. Niente elenchi, niente sezioni. Puoi usare qualche emoji se appropriato. Concentrati sui fatti, le idee, le notizie e gli argomenti discussi - non sulle persone. Non citare i nomi dei partecipanti a meno che non sia strettamente necessario. Parla di cosa è stato detto, non di chi l'ha detto. Se ci sono link, integra commenti su di essi nel discorso. Concludi con un saluto della buonanotte che riassuma lo spitito della giornata.
 PROMPT;
 
-    file_put_contents('ai.log', "=== SALUTO REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
+    file_put_contents($logFile, "Starting Ollama call...\n", FILE_APPEND);
+    file_put_contents($logFile, "=== SALUTO REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
 
     $data = json_encode([
         'model' => $model,
@@ -360,18 +373,25 @@ PROMPT;
     };
 
     curl_setopt($ch, CURLOPT_WRITEFUNCTION, $callback);
+    $startOllama = time();
     curl_exec($ch);
+    $elapsedOllama = time() - $startOllama;
 
     if (curl_errno($ch)) {
-        return "Errore AI: " . curl_error($ch);
+        $error = curl_error($ch);
+        file_put_contents($logFile, "Ollama CURL ERROR after {$elapsedOllama}s: $error\n", FILE_APPEND);
+        return "Errore AI: " . $error;
     }
     curl_close($ch);
+
+    file_put_contents($logFile, "Ollama completed in {$elapsedOllama}s, raw response length: " . strlen($response) . "\n", FILE_APPEND);
 
     // Rimuovi i tag <think>...</think> di DeepSeek-R1
     $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
     $response = trim($response);
 
-    file_put_contents('ai.log', "=== SALUTO RESPONSE ===\n" . $response . "\n\n", FILE_APPEND);
+    file_put_contents($logFile, "=== SALUTO RESPONSE (after cleanup) ===\n" . $response . "\n\n", FILE_APPEND);
+    file_put_contents($logFile, "Final response length: " . strlen($response) . "\n", FILE_APPEND);
 
     return $response;
 }
@@ -448,12 +468,8 @@ function _dj($chatID, $hoursAgo = 0) {
 
     $formatter = new IntlDateFormatter('it_IT', IntlDateFormatter::FULL, IntlDateFormatter::NONE);
 
-    // Carica gli ultimi incipit usati per evitare ripetizioni
-    $incipitFile = __DIR__ . '/../dj_incipit.json';
-    $usedIncipits = [];
-    if (file_exists($incipitFile)) {
-        $usedIncipits = json_decode(file_get_contents($incipitFile), true) ?: [];
-    }
+    // Carica gli ultimi incipit usati per evitare ripetizioni (da database)
+    $usedIncipits = getBotState('dj_incipits', []);
     $incipitWarning = '';
     if (!empty($usedIncipits)) {
         $incipitWarning = "\n\nATTENZIONE: NON iniziare con queste parole/frasi già usate di recente:\n- " . implode("\n- ", $usedIncipits);
@@ -540,7 +556,7 @@ Un breve intervento radiofonico (3-4 frasi max). Niente emoji. Solo testo parlat
 PROMPT;
     }
 
-    file_put_contents('ai.log', "=== DJ REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
+    file_put_contents(dirname(__DIR__) . '/ai.log', "=== DJ REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
 
     $data = json_encode([
         'model' => $model,
@@ -579,25 +595,19 @@ PROMPT;
     $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
     $response = trim($response);
 
-    // Salva l'incipit per evitare ripetizioni future
+    // Salva l'incipit per evitare ripetizioni future (in database)
     if (!empty($response)) {
         // Estrai le prime 3-4 parole come incipit
         $words = preg_split('/\s+/', $response);
         $incipit = implode(' ', array_slice($words, 0, 3));
 
-        // Carica incipit esistenti
-        $incipitFile = __DIR__ . '/../dj_incipit.json';
-        $usedIncipits = [];
-        if (file_exists($incipitFile)) {
-            $usedIncipits = json_decode(file_get_contents($incipitFile), true) ?: [];
-        }
-
         // Aggiungi nuovo e mantieni solo gli ultimi 3
+        $usedIncipits = getBotState('dj_incipits', []);
         $usedIncipits[] = $incipit;
         $usedIncipits = array_slice($usedIncipits, -3);
+        setBotState('dj_incipits', $usedIncipits);
 
-        file_put_contents($incipitFile, json_encode($usedIncipits));
-        file_put_contents($djLog, "Nuovo incipit salvato: $incipit\n", FILE_APPEND);
+        error_log("[dj] Nuovo incipit salvato: $incipit");
     }
 
     // Se è una news HN, appendi il link e marca come postata
@@ -609,7 +619,7 @@ PROMPT;
         file_put_contents($djLog, "HN: story {$hnStoryId} marcata come postata\n", FILE_APPEND);
     }
 
-    file_put_contents('ai.log', "=== DJ RESPONSE ===\n" . $response . "\n\n", FILE_APPEND);
+    file_put_contents(dirname(__DIR__) . '/ai.log', "=== DJ RESPONSE ===\n" . $response . "\n\n", FILE_APPEND);
 
     return $response;
 }
@@ -675,6 +685,28 @@ function markHNStoryPosted($storyId, $title) {
     $stmt = $db->prepare("INSERT OR REPLACE INTO hn_posted (story_id, title, posted_at) VALUES (:id, :title, :time)");
     $stmt->bindValue(':id', $storyId, SQLITE3_INTEGER);
     $stmt->bindValue(':title', $title, SQLITE3_TEXT);
+    $stmt->bindValue(':time', time(), SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
+function getBotState($key, $default = null) {
+    global $db;
+    $stmt = $db->prepare("SELECT value FROM bot_state WHERE key = :key");
+    $stmt->bindValue(':key', $key, SQLITE3_TEXT);
+    $result = $stmt->execute();
+    $row = $result->fetchArray(SQLITE3_ASSOC);
+    if ($row) {
+        return json_decode($row['value'], true) ?? $row['value'];
+    }
+    return $default;
+}
+
+function setBotState($key, $value) {
+    global $db;
+    $jsonValue = is_array($value) ? json_encode($value) : $value;
+    $stmt = $db->prepare("INSERT OR REPLACE INTO bot_state (key, value, updated_at) VALUES (:key, :value, :time)");
+    $stmt->bindValue(':key', $key, SQLITE3_TEXT);
+    $stmt->bindValue(':value', $jsonValue, SQLITE3_TEXT);
     $stmt->bindValue(':time', time(), SQLITE3_INTEGER);
     $stmt->execute();
 }

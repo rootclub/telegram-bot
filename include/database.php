@@ -111,6 +111,13 @@ function initDatabase() {
     $weekAgo = time() - (7 * 24 * 3600);
     $db->exec("DELETE FROM hn_posted WHERE posted_at < $weekAgo");
 
+    // Tabella per stato generico del bot (chiave-valore)
+    $db->exec("CREATE TABLE IF NOT EXISTS bot_state (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at INTEGER
+    )");
+
     // Migration: aggiungi colonne se non esistono
     // Per user_states - aggiungi user_id
     $result = $db->query("PRAGMA table_info(user_states)");

@@ -22,26 +22,23 @@ initDatabase();
 // ID del gruppo principale
 define('MAIN_GROUP_ID', -1001402757977);
 
-// Lock anti-duplicati
-$lockFile = __DIR__ . '/saluto_cron.lock';
+// Lock anti-duplicati (in /tmp per evitare problemi di permessi)
+$lockFile = '/tmp/saluto_cron.lock';
 $lockTimeout = 600; // 10 minuti
 
 if (file_exists($lockFile)) {
     $lockTime = (int)file_get_contents($lockFile);
     if (time() - $lockTime < $lockTimeout) {
-        error_log("cron_saluto: Already running, skipping");
+        error_log("[cron_saluto] Already running, skipping");
         exit(0);
     }
 }
 
 file_put_contents($lockFile, time());
 
-// File di log dedicato
-$logFile = __DIR__ . '/cron_saluto.log';
+// Logging via error_log
 function cron_log($msg) {
-    global $logFile;
-    $timestamp = date('Y-m-d H:i:s');
-    file_put_contents($logFile, "[$timestamp] $msg\n", FILE_APPEND);
+    error_log("[cron_saluto] $msg");
 }
 
 try {
