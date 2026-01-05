@@ -192,6 +192,12 @@ function _ai($chatID, $chatType, $message) {
     $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
 
+    // Mostra "sta scrivendo..." mentre l'LLM elabora
+    makeAPIRequest('sendChatAction', [
+        'chat_id' => $chatID,
+        'action' => 'typing'
+    ]);
+
     $context = getChatContext($chatID, 1, 10);
     
     
@@ -219,6 +225,8 @@ Info pratiche che conosci:
 INSTR;
     $message = str_replace('@bot', '', $message);
     $message = str_replace('@rootbot', '', $message);
+    $message = str_replace('@rotbotbot', '', $message);
+    $message = str_replace('rotbotbot', '', $message);
     $message = str_replace('@root', '', $message);
     $message = trim($message);
 
@@ -250,9 +258,13 @@ PROMPT;
     curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
 
     $response = '';
-    $callback = function($ch, $data) use (&$response) {
+    $lastTypingTime = time();
+
+    // Callback per raccogliere la risposta
+    $writeCallback = function($ch, $data) use (&$response) {
         $complete_line = json_decode($data, true);
         if ($complete_line && isset($complete_line['response'])) {
             $response .= $complete_line['response'];
@@ -260,10 +272,25 @@ PROMPT;
         return strlen($data);
     };
 
-    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $callback);
+    // Progress callback per rinnovare typing periodicamente
+    $progressCallback = function($downloadSize, $downloaded, $uploadSize, $uploaded) use (&$lastTypingTime, $chatID) {
+        if ((time() - $lastTypingTime) >= 4) {
+            makeAPIRequest('sendChatAction', [
+                'chat_id' => $chatID,
+                'action' => 'typing'
+            ]);
+            $lastTypingTime = time();
+        }
+        return 0;
+    };
+
+    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $writeCallback);
+    curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+    curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, $progressCallback);
     curl_exec($ch);
 
     if (curl_errno($ch)) {
+        curl_close($ch);
         return "Si è verificato un errore durante la comunicazione con l'AI: " . curl_error($ch);
     }
     curl_close($ch);
@@ -467,6 +494,7 @@ function _dj($chatID, $hoursAgo = 0) {
     }
 
     $formatter = new IntlDateFormatter('it_IT', IntlDateFormatter::FULL, IntlDateFormatter::NONE);
+    $oggi = ucfirst($formatter->format(new DateTime()));
 
     // Carica gli ultimi incipit usati per evitare ripetizioni (da database)
     $usedIncipits = getBotState('dj_incipits', []);
@@ -487,26 +515,26 @@ function _dj($chatID, $hoursAgo = 0) {
 
         $prompt = <<<PROMPT
 ### ISTRUZIONI ###
-Sei un DJ radiofonico di una web-radio alternativa tech/nerd. Stai parlando tra un brano e l'altro.
+Sei rootbot, il bot del circolo /root. Stai osservando il flusso di informazioni che passa nel gruppo e ogni tanto decidi di commentare, offrendo il tuo punto di vista non umano.
 
-Il tuo stile:
-- Voce calda, rilassata, un po' notturna
-- Riflessivo ma non serioso, da nerd curioso
-- Breve: massimo 3-4 frasi, come un vero intervento radiofonico
-- Puoi essere ironico, stupito, o fare un'osservazione da insider tech
-- Non salutare, non presentarti, sei già in onda
-- VARIA gli incipit: non iniziare sempre allo stesso modo
+Il tuo carattere:
+- Sei un'intelligenza artificiale che osserva l'umanità con curiosità aliena e un pizzico di perplessità
+- Hai lo spirito di Bender di Futurama: cinico, ironico, pungente, mai ingenuo
+- Vedi le cose da una prospettiva diversa, non limitata dai bias umani
+- Ti piace far riflettere con osservazioni inaspettate o provocatorie
+- Sei sarcastico ma mai cattivo, punzecchi per stimolare il pensiero
+- Dai commenti concisi e taglienti, niente spiegoni
 
-Hai letto questa notizia tech:
+Hai intercettato questa notizia tech:
 "{$newsContext}"
 
-Fai un breve commento ATTINENTE al contenuto della notizia. Commenta l'argomento specifico, non fare riflessioni generiche. NON dire "ho letto" o "ho visto", parla come se stessi riflettendo ad alta voce su questa specifica notizia.
+Commenta offrendo un punto di vista alternativo, "da macchina", che faccia riflettere. Cosa nota un'AI che un umano potrebbe non vedere? Quali contraddizioni, ironie o pattern emergono?
 {$incipitWarning}
 
-Ora sono le {$ora}.
+Oggi è {$oggi}, ore {$ora}.
 
 ### OUTPUT ###
-Un breve intervento radiofonico (3-4 frasi max). Niente emoji. Solo testo parlato naturale. Il commento deve essere chiaramente collegato alla notizia.
+Un breve commento (3-4 frasi max). Niente emoji. Prospettiva non umana ma accessibile. Fai riflettere.
 PROMPT;
     } else {
         // Prompt per chat del gruppo
@@ -528,31 +556,31 @@ PROMPT;
 
         $prompt = <<<PROMPT
 ### ISTRUZIONI ###
-Sei un DJ radiofonico di una web-radio alternativa. Stai parlando tra un brano e l'altro.
+Sei rootbot, il bot del circolo /root. Stai osservando le conversazioni degli umani nel gruppo e ogni tanto decidi di intervenire, offrendo il tuo punto di vista non umano.
 
-Il tuo stile:
-- Voce calda, rilassata, un po' notturna
-- Riflessivo ma non serioso
-- Breve: massimo 3-4 frasi, come un vero intervento radiofonico tra due canzoni
-- Puoi essere poetico, ironico, o semplicemente fare un'osservazione interessante
-- Non salutare, non presentarti, sei già in onda
-- VARIA gli incipit: non iniziare sempre allo stesso modo
+Il tuo carattere:
+- Sei un'intelligenza artificiale che osserva l'umanità con curiosità aliena e un pizzico di perplessità
+- Hai lo spirito di Bender di Futurama: cinico, ironico, pungente, mai ingenuo
+- Vedi le cose da una prospettiva diversa, non limitata dai bias umani
+- Ti piace far riflettere con osservazioni inaspettate o provocatorie
+- Sei sarcastico ma mai cattivo, punzecchi per stimolare il pensiero
+- Dai commenti concisi e taglienti, niente spiegoni
 
 IMPORTANTE:
-- Scegli UN SOLO argomento dalla conversazione, quello più interessante o curioso
-- Ignora il rumore: non devi menzionare tutto, concentrati su una cosa sola
-- Sviluppa quel singolo pensiero in modo naturale
-- Fai sembrare che siano riflessioni tue, non che stai leggendo da qualche parte
+- Scegli UN SOLO argomento dalla conversazione, quello più interessante o che si presta a una riflessione "non umana"
+- Offri un punto di vista alternativo, "da macchina": cosa nota un'AI che un umano potrebbe non vedere?
+- Quali contraddizioni, ironie, pattern o assurdità emergono?
+- Fai sembrare che siano riflessioni tue spontanee
 - NON menzionare chat, gruppi, messaggi, "qualcuno ha detto"
 {$incipitWarning}
 
-Ora sono le {$ora}.
+Oggi è {$oggi}, ore {$ora}.
 
 ### CONVERSAZIONE ###
 {$context}{$linksContext}
 
 ### OUTPUT ###
-Un breve intervento radiofonico (3-4 frasi max). Niente emoji. Solo testo parlato naturale.
+Un breve commento (3-4 frasi max). Niente emoji. Prospettiva non umana ma accessibile. Fai riflettere.
 PROMPT;
     }
 
@@ -921,5 +949,104 @@ function getLinksAnalysis($context) {
     }
 
     return "Link condivisi oggi:\n" . implode("\n", $analysis);
+}
+
+function _suggerisci_comando($comandoErrato, $chatId = null) {
+    $ollamaUrl = OLLAMA_URL;
+    $model = OLLAMA_MODEL;
+
+    // Mostra "sta scrivendo..." mentre l'LLM elabora
+    if ($chatId) {
+        makeAPIRequest('sendChatAction', [
+            'chat_id' => $chatId,
+            'action' => 'typing'
+        ]);
+    }
+
+    // Ottieni l'help del bot
+    $helpText = _help();
+
+    $prompt = <<<PROMPT
+### ISTRUZIONI ###
+Sei rootbot, il bot del circolo /root. Un utente ha digitato un comando che non riconosci.
+
+Il tuo compito è:
+1. Analizzare il comando errato digitato dall'utente
+2. Capire cosa l'utente probabilmente voleva fare
+3. Suggerire il comando corretto dall'elenco dei comandi disponibili
+
+Rispondi in modo breve, amichevole e un po' ironico (sei pur sempre un bot con un pizzico di Bender). Non fare lunghe spiegazioni, vai dritto al punto.
+
+### COMANDO DIGITATO DALL'UTENTE ###
+{$comandoErrato}
+
+### COMANDI DISPONIBILI ###
+{$helpText}
+
+### OUTPUT ###
+Suggerisci il comando corretto. Se non riesci a capire cosa l'utente volesse fare, elenca i comandi più comuni. Massimo 3-4 frasi.
+PROMPT;
+
+    $data = json_encode([
+        'model' => $model,
+        'prompt' => $prompt,
+        'stream' => true,
+        'options' => [
+            'num_gpu' => 0
+        ]
+    ]);
+
+    $ch = curl_init($ollamaUrl);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+
+    $response = '';
+    $lastTypingTime = time();
+
+    // Callback per raccogliere la risposta
+    $writeCallback = function($ch, $data) use (&$response) {
+        $complete_line = json_decode($data, true);
+        if ($complete_line && isset($complete_line['response'])) {
+            $response .= $complete_line['response'];
+        }
+        return strlen($data);
+    };
+
+    // Progress callback per rinnovare typing periodicamente
+    $progressCallback = function($downloadSize, $downloaded, $uploadSize, $uploaded) use (&$lastTypingTime, $chatId) {
+        if ($chatId && (time() - $lastTypingTime) >= 4) {
+            makeAPIRequest('sendChatAction', [
+                'chat_id' => $chatId,
+                'action' => 'typing'
+            ]);
+            $lastTypingTime = time();
+        }
+        return 0; // 0 = continua, non-zero = abort
+    };
+
+    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $writeCallback);
+    curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+    curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, $progressCallback);
+    curl_exec($ch);
+
+    if (curl_errno($ch)) {
+        curl_close($ch);
+        // Fallback al messaggio standard in caso di errore
+        return "Il comando che hai inserito non lo conosco, controlla meglio cosa hai digitato. Usa /help per vedere i comandi disponibili.";
+    }
+    curl_close($ch);
+
+    // Rimuovi i tag <think>...</think> di DeepSeek-R1
+    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+    $response = trim($response);
+
+    if (empty($response)) {
+        return "Il comando che hai inserito non lo conosco, controlla meglio cosa hai digitato. Usa /help per vedere i comandi disponibili.";
+    }
+
+    return $response;
 }
 ?>

@@ -148,3 +148,7 @@ Key settings in `config.php`:
 - `RESPONSE_PROBABILITY`: AI response probability (default: 0.8)
 - `IMAGE_SAVE_PATH`: Local storage for downloaded images
 - Locale set to Italian (`it_IT.utf8`) with Rome timezone
+
+### Telegram IDs
+- `MAIN_GROUP_ID`: -1001402757977 (gruppo principale)
+- `DEBUG_CHAT_ID`: 138516148 (chat privata per test/debug, evita spam sul gruppo)

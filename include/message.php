@@ -33,6 +33,9 @@ function processMessage($message) {
     $firstName = $message['from']['first_name'] ?? 'Utente';
     $response = null;
 
+    // Pulisci stati utente scaduti (timeout 10 minuti)
+    cleanupExpiredUserStates();
+
     // Controlla se è un reply a un messaggio del bot
     $isReplyToBot = false;
     if (isset($message['reply_to_message']['from']['username']) &&
@@ -160,11 +163,19 @@ function processMessage($message) {
         
     } elseif (isset($message['photo'])) {
         $response = handle_image($message);
-        
+
+    } elseif (isset($message['document']) && isImageDocument($message['document'])) {
+        // L'utente ha inviato un'immagine come file (senza compressione)
+        $response = handleDocumentImage($message);
+
+    } elseif (isset($message['document']) && !isImageDocument($message['document'])) {
+        // L'utente ha inviato un file non-immagine (PDF, ecc.)
+        $response = handleNonImageDocument($message);
+
     } elseif ($text == '/elimina_asporto') {
         $response = elimina_pappatoia($chatID, $fromId);
         
-    } elseif (preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/\brootbot\b/i', $text) || $isReplyToBot) {
+    } elseif (preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/\brootbot\b/i', $text) || preg_match('/\brotbotbot\b/i', $text) || $isReplyToBot) {
         $response = _ai($chatID, $chatType, $text);
 
     } elseif (preg_match('/^\/saluto(?:@rootbotbot)?(?:\s+-(\d+))?$/', $text, $salutoMatches)) {
@@ -228,7 +239,7 @@ function processMessage($message) {
         return;
 
     } elseif (strpos($text, '/') === 0) {
-        $response = "Il comando che hai inserito non lo conosco, controlla meglio cosa hai digitato";
+        $response = _suggerisci_comando($text, $chatID);
     }
 
 

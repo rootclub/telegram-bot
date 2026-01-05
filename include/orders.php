@@ -460,9 +460,10 @@ function nuova_pappatoia($chat_id, $message_id, $text) {
     
     // Imposta lo stato dell'utente per aspettare le immagini
     $db->exec("CREATE TABLE IF NOT EXISTS user_states (chat_id INTEGER, state TEXT, data TEXT)");
-    $stmt = $db->prepare("INSERT OR REPLACE INTO user_states (chat_id, state, data) VALUES (:chat_id, 'waiting_images', :pappatoia_id)");
+    $stmt = $db->prepare("INSERT OR REPLACE INTO user_states (chat_id, state, data, created_at) VALUES (:chat_id, 'waiting_images', :pappatoia_id, :created_at)");
     $stmt->bindValue(':chat_id', $chat_id, SQLITE3_INTEGER);
     $stmt->bindValue(':pappatoia_id', $pappatoia_id, SQLITE3_TEXT);
+    $stmt->bindValue(':created_at', time(), SQLITE3_INTEGER);
     $stmt->execute();
     
     return null;
@@ -605,9 +606,10 @@ function handle_menu_action($callbackQuery) {
 
     // Imposta lo stato dell'utente per aspettare le nuove immagini
     $chatId = $callbackQuery['message']['chat']['id'];
-    $stmt = $db->prepare("INSERT OR REPLACE INTO user_states (chat_id, state, data) VALUES (:chat_id, 'waiting_menu_images', :pappatoia_id)");
+    $stmt = $db->prepare("INSERT OR REPLACE INTO user_states (chat_id, state, data, created_at) VALUES (:chat_id, 'waiting_menu_images', :pappatoia_id, :created_at)");
     $stmt->bindValue(':chat_id', $chatId, SQLITE3_INTEGER);
     $stmt->bindValue(':pappatoia_id', $pappatoiaId, SQLITE3_TEXT);
+    $stmt->bindValue(':created_at', time(), SQLITE3_INTEGER);
     $stmt->execute();
 
     makeAPIRequest('editMessageText', [

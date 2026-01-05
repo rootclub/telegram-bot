@@ -51,7 +51,7 @@ try {
     $elapsed = time() - $startTime;
     cron_log("_saluto() completed in {$elapsed} seconds");
 
-    if (empty($saluto) || strpos($saluto, 'Nessun messaggio') !== false) {
+    if (empty($saluto) || strpos($saluto, 'Nessun messaggio trovato') === 0) {
         cron_log("No messages today, skipping");
         @unlink($lockFile);
         exit(0);

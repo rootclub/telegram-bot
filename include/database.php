@@ -119,17 +119,23 @@ function initDatabase() {
     )");
 
     // Migration: aggiungi colonne se non esistono
-    // Per user_states - aggiungi user_id
+    // Per user_states - aggiungi user_id e created_at
     $result = $db->query("PRAGMA table_info(user_states)");
     $hasUserId = false;
+    $hasCreatedAt = false;
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
         if ($row['name'] == 'user_id') {
             $hasUserId = true;
-            break;
+        }
+        if ($row['name'] == 'created_at') {
+            $hasCreatedAt = true;
         }
     }
     if (!$hasUserId) {
         $db->exec("ALTER TABLE user_states ADD COLUMN user_id INTEGER");
+    }
+    if (!$hasCreatedAt) {
+        $db->exec("ALTER TABLE user_states ADD COLUMN created_at INTEGER");
     }
 
     // Per elementi_ordini
