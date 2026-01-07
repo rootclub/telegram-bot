@@ -45,7 +45,7 @@ if (isset($update['message'])) {
     $messageText = str_replace('@root', '', $messageText);
     saveMessageToContext($groupId, $userName, $messageText);
 } elseif (isset($update['edited_message'])) {
-    processMessage($update['edited_message']);
+    // Ignora i messaggi editati per evitare risposte duplicate
 } elseif (isset($update['callback_query'])) {
     $callbackQuery = $update['callback_query'];
     $data = $callbackQuery['data'];

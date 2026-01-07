@@ -1,4 +1,47 @@
 <?php
+
+/**
+ * Controlla se un messaggio è un duplicato recente dallo stesso utente.
+ * @param int $userId ID utente
+ * @param string $text Testo del messaggio
+ * @param int $windowSeconds Finestra temporale in secondi (default 60)
+ * @return bool true se è un duplicato, false altrimenti
+ */
+function isDuplicateMessage($userId, $text, $windowSeconds = 60) {
+    global $db;
+
+    $messageHash = md5($text);
+    $cutoff = time() - $windowSeconds;
+
+    $stmt = $db->prepare("SELECT COUNT(*) as cnt FROM message_dedup
+                          WHERE user_id = :user_id
+                          AND message_hash = :hash
+                          AND timestamp > :cutoff");
+    $stmt->bindValue(':user_id', $userId, SQLITE3_INTEGER);
+    $stmt->bindValue(':hash', $messageHash, SQLITE3_TEXT);
+    $stmt->bindValue(':cutoff', $cutoff, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+    $row = $result->fetchArray(SQLITE3_ASSOC);
+
+    return ($row['cnt'] > 0);
+}
+
+/**
+ * Registra un messaggio per il controllo duplicati.
+ */
+function recordMessage($userId, $text) {
+    global $db;
+
+    $messageHash = md5($text);
+
+    $stmt = $db->prepare("INSERT INTO message_dedup (user_id, message_hash, timestamp)
+                          VALUES (:user_id, :hash, :timestamp)");
+    $stmt->bindValue(':user_id', $userId, SQLITE3_INTEGER);
+    $stmt->bindValue(':hash', $messageHash, SQLITE3_TEXT);
+    $stmt->bindValue(':timestamp', time(), SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
 function sendPrivateResponse($userId, $text, $chatId = null) {
     $privateChat = makeAPIRequest('sendMessage', [
         'chat_id' => $userId,
@@ -32,6 +75,16 @@ function processMessage($message) {
     $fromId = $message['from']['id'];
     $firstName = $message['from']['first_name'] ?? 'Utente';
     $response = null;
+
+    // Filtro anti-spam: ignora messaggi duplicati dallo stesso utente
+    if (!empty($text) && isDuplicateMessage($fromId, $text)) {
+        error_log("Messaggio duplicato ignorato da utente $fromId: " . substr($text, 0, 50));
+        return;
+    }
+    // Registra il messaggio per futuri controlli duplicati
+    if (!empty($text)) {
+        recordMessage($fromId, $text);
+    }
 
     // Pulisci stati utente scaduti (timeout 10 minuti)
     cleanupExpiredUserStates();

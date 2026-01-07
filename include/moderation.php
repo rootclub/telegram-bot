@@ -213,39 +213,29 @@ function getProfanityStats() {
 ///////////////////////////////////////////////////////////
 //////////////////////// PORTO AL ROOT ////////////////////
 ///////////////////////////////////////////////////////////
+
+/**
+ * Filtro preliminare basato su parole chiave.
+ * Triggera solo se ci sono verbi di "portare/lasciare" + destinazione "root/circolo".
+ */
 function is_porto_al_root($text) {
     $text = mb_strtolower($text);
-    
-    $azioni = '(porta|porto|portare|porterei|porterò|porteremo|porteremmo|posso\s+portare|vorrei\s+portare|' .
-              'portarlo|portarla|portarli|portarle|portarcelo|portarcela|portarceli|portarcele|' .
-              'lascia|lascio|lasciare|lascerei|lascierò|lascerò|lasceremo|laseremmo|posso\s+lasciare|vorrei\s+lasciare|' .
-              'lasciarlo|lasciarla|lasciarli|lasciarle|lasciarcelo|lasciarcela|lasciarceli|lasciarcele|' .
-              'da|do|dare|darei|posso\s+dare|vorrei\s+dare|' .
-              'darlo|darla|darli|darle|darcelo|darcela|darceli|darcele|' .
-              'consegna|consegno|consegnare|consegnerei|posso\s+consegnare|vorrei\s+consegnare|' .
-              'consegnarlo|consegnarla|consegnarli|consegnarle|consegnarcelo|consegnarcela|consegnarceli|consegnarcele|' .
-              'arriva|arriver[àa]|far[àa]\s+arrivare|posso\s+far\s+arrivare|' .
-              'farlo\s+arrivare|farla\s+arrivare|farli\s+arrivare|farle\s+arrivare|' .
-              'contribui|contribuire|contribuirei|posso\s+contribuire|vorrei\s+contribuire)';
-    
-    $oggetti = '(qualcosa|roba|cose?|oggett[oi]|materiale?|attrezzatura?)?';
-    
-    $destinazioni = '(root|\/root|circolo|associazione|club|sede)';
-    
-    $preposizioni = '(al|nel|allo?|nella?|a|in|presso|verso|per\s+il?)?';
-    
+
+    // Verbi che indicano l'azione di portare/lasciare qualcosa
+    $verbi = '(port[oai]|porter[òoei]|portare|porterei|porteremo|' .
+             'lasci[oai]|lascer[òoei]|lasciare|lascerei|lasceremo|' .
+             'moll[oai]|moller[òoei]|mollare|mollerei|molleremo|' .
+             'don[oai]|doner[òoei]|donare|donerei|doneremo|' .
+             'sbarazz|liberarmi|liberarci|disfarmi|disfarci)';
+
+    // Destinazioni che indicano il circolo
+    $destinazioni = '(root|\/root|circolo|sede|club)';
+
     $patterns = [
-        "/\b$azioni\s*$oggetti\s*$preposizioni\s*$destinazioni\b/i",
-        "/\b$oggetti\s*$azioni\s*$preposizioni\s*$destinazioni\b/i",
-        "/\b(te|vi|voi)\s*$azioni\s*$oggetti\s*$preposizioni\s*$destinazioni?\b/i",
-        "/\b(ho|avrei)\s*(intenzione|voglia|idea)\s*di\s*$azioni\s*$oggetti\s*$preposizioni\s*$destinazioni\b/i",
-        "/\b(posso|potrei|si\s+pu[òo])\s*$azioni\s*$oggetti\s*$preposizioni\s*$destinazioni\b/i",
-        "/\bc'[èe]\s*$oggetti\s*(da|che\s+devo)\s*$azioni\s*$preposizioni\s*$destinazioni\b/i",
-        "/\bserve\s*$oggetti\s*$preposizioni\s*$destinazioni\b/i",
-        "/\b$destinazioni\s*ha\s*bisogno\s*di\s*$oggetti\b/i",
-        "/\b$azioni\s*$preposizioni\s*$destinazioni\b/i"  // Nuovo pattern per forme come "portarlo al root"
+        "/\b$verbi\b.*\b$destinazioni\b/i",
+        "/\b$destinazioni\b.*\b$verbi\b/i"
     ];
-    
+
     foreach ($patterns as $pattern) {
         if (preg_match($pattern, $text)) {
             return true;
@@ -254,25 +244,161 @@ function is_porto_al_root($text) {
     return false;
 }
 
+/**
+ * Valuta con modello leggero se il messaggio parla di hardware/oggetti fisici.
+ * @return bool true se è hardware, false altrimenti
+ */
+function isHardwareOffer($text) {
+    $ollamaUrl = OLLAMA_URL;
+    $model = OLLAMA_MODEL_LIGHT;
+
+    $prompt = <<<PROMPT
+Analizza questo messaggio e rispondi SOLO con "SI" o "NO".
+
+Rispondi "SI" SOLO se:
+- Qualcuno vuole SERIAMENTE portare/lasciare/donare oggetti fisici REALI e IDENTIFICABILI (es: computer, monitor, stampante, cavi, router, mobili, attrezzi)
+- L'oggetto deve essere chiaramente nominato e riconoscibile
+
+Rispondi "NO" se:
+- Parla di portare persone, amici, ospiti
+- Parla di cibo o bevande
+- L'oggetto non è chiaramente identificabile o ha un nome inventato/nonsense
+- Il messaggio sembra una battuta, parodia, supercazzola, o test
+- Contiene parole inventate o senza senso (es: "qualcosimetro", "antani", "tapioca")
+- È una citazione o presa in giro di un altro messaggio
+- C'è qualsiasi dubbio sulla serietà del messaggio
+
+NEL DUBBIO, RISPONDI SEMPRE "NO".
+
+Messaggio: "{$text}"
+
+Risposta (solo SI o NO):
+PROMPT;
+
+    $data = json_encode([
+        'model' => $model,
+        'prompt' => $prompt,
+        'stream' => false,
+        'options' => [
+            'num_gpu' => 0,
+            'temperature' => 0.1
+        ]
+    ]);
+
+    $ch = curl_init($ollamaUrl);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+    $response = curl_exec($ch);
+
+    if (curl_errno($ch)) {
+        error_log("isHardwareOffer CURL error: " . curl_error($ch));
+        curl_close($ch);
+        return false;
+    }
+    curl_close($ch);
+
+    $result = json_decode($response, true);
+    $answer = strtoupper(trim($result['response'] ?? ''));
+
+    // Rimuovi tag <think> se presenti
+    $answer = preg_replace('/<think>.*?<\/think>/s', '', $answer);
+    $answer = strtoupper(trim($answer));
+
+    error_log("isHardwareOffer: '$text' -> '$answer'");
+
+    return (strpos($answer, 'SI') !== false || strpos($answer, 'SÌ') !== false);
+}
+
+/**
+ * Genera un messaggio contestuale con il modello principale.
+ */
+function generateHardwareWarning($userName, $text) {
+    $ollamaUrl = OLLAMA_URL;
+    $model = OLLAMA_MODEL;
+
+    $prompt = <<<PROMPT
+Sei rootbot, il bot del circolo /root. Hai un carattere cinico e ironico come Bender di Futurama, ma sotto sotto ti stanno simpatici questi umani.
+
+Un utente ({$userName}) ha scritto questo messaggio nel gruppo:
+"{$text}"
+
+L'utente sembra voler portare/lasciare/donare degli oggetti fisici al circolo.
+
+Scrivi un messaggio che:
+- Faccia capire gentilmente ma fermamente che il circolo ha GIÀ accumulato troppi oggetti/rottami nel corso degli anni
+- Spieghi che portare cose "perché c'è posto" o "magari servono" ha riempito la sede di materiale che poi qualcuno deve smaltire (portare in discarica, pagare lo smaltimento, ecc.)
+- Sia contestuale a quello che l'utente ha scritto
+- Abbia un tono amichevole ma fermo, con un pizzico di ironia/sarcasmo
+- Non superi le 3-4 frasi
+- Non sia offensivo o maleducato
+
+Rispondi SOLO con il messaggio, senza preamboli:
+PROMPT;
+
+    $data = json_encode([
+        'model' => $model,
+        'prompt' => $prompt,
+        'stream' => false,
+        'options' => [
+            'num_gpu' => 0,
+            'temperature' => 0.8
+        ]
+    ]);
+
+    $ch = curl_init($ollamaUrl);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+
+    $response = curl_exec($ch);
+
+    if (curl_errno($ch)) {
+        error_log("generateHardwareWarning CURL error: " . curl_error($ch));
+        curl_close($ch);
+        // Fallback a messaggio standard
+        return "Ehi $userName, apprezzo il pensiero, ma il /root è già pieno di rottami che qualcuno prima o poi dovrà portare in discarica. Se non c'è uno scopo specifico, meglio evitare di accumulare altra roba!";
+    }
+    curl_close($ch);
+
+    $result = json_decode($response, true);
+    $answer = trim($result['response'] ?? '');
+
+    // Rimuovi tag <think> se presenti
+    $answer = preg_replace('/<think>.*?<\/think>/s', '', $answer);
+    $answer = trim($answer);
+
+    error_log("generateHardwareWarning: generated message for '$text'");
+
+    if (empty($answer)) {
+        return "Ehi $userName, apprezzo il pensiero, ma il /root è già pieno di rottami che qualcuno prima o poi dovrà portare in discarica. Se non c'è uno scopo specifico, meglio evitare di accumulare altra roba!";
+    }
+
+    return $answer;
+}
+
+/**
+ * Gestisce il messaggio "porto al root".
+ * 1. Valuta con modello leggero se è hardware
+ * 2. Se sì, genera messaggio con modello principale
+ */
 function handle_porto_al_root($message) {
     $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
-    $text = mb_strtolower($message['text']);
-    
-    // Estrai l'azione (porto/lascio) dal messaggio
-    $action = preg_match('/\b(porto)\b/', $text) ? 'portare' : 'lasciare';
-    
-    // Rimuovi le parole chiave per isolare l'oggetto
-    $item = preg_replace('/\b(lo|la|li|le)?\s*(porto|lascio)\s*(al|a)\s*(root|\/root|circolo)\b/', '', $text);
-    $item = preg_replace('/\bte\s*(lo|la|li|le)\s*(porto|lascio)\s*(al|a)?\s*(root|\/root|circolo)?\b/', '', $item);
-    $item = trim($item);
+    $text = $message['text'];
 
-    #if (empty($item)) {
-    #    return "$userName, grazie per offrirti di $action qualcosa al root! Cosa hai intenzione di $action?";
-    #} else {
-    #    // Qui puoi aggiungere la logica per gestire l'elemento portato/lasciato, ad esempio aggiungerlo a un database o a una lista
-    #    return "$userName, grazie per offrirti di $action '$item' al root! È molto apprezzato.";
-    #}
-    
-    return "Scusate se mi intrometto, se non ho capito male $userName porterebbe qualcosa al /Root. Vorrei ricordare a tutti che portare cose nella sede dell'associazione, senza uno specifico scopo, ma solo perchè c'è posto, ha portato ad accumulare rottami (e ora non c'è più il posto per fare altro), che poi qualcun'altro ha dovuto portare in discarica (o dovrà portare in discarica).";
+    // Fase 1: Valutazione con modello leggero
+    if (!isHardwareOffer($text)) {
+        error_log("handle_porto_al_root: non è hardware, skip");
+        return null;
+    }
+
+    // Fase 2: Generazione messaggio con modello principale
+    error_log("handle_porto_al_root: rilevato hardware, generando messaggio");
+    return generateHardwareWarning($userName, $text);
 }
 ?>

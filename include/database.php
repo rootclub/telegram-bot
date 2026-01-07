@@ -118,6 +118,18 @@ function initDatabase() {
         updated_at INTEGER
     )");
 
+    // Tabella per deduplicazione messaggi (anti-spam)
+    $db->exec("CREATE TABLE IF NOT EXISTS message_dedup (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        message_hash TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_dedup_user_hash ON message_dedup(user_id, message_hash)");
+    // Pulizia automatica: rimuovi record più vecchi di 5 minuti
+    $fiveMinutesAgo = time() - 300;
+    $db->exec("DELETE FROM message_dedup WHERE timestamp < $fiveMinutesAgo");
+
     // Migration: aggiungi colonne se non esistono
     // Per user_states - aggiungi user_id e created_at
     $result = $db->query("PRAGMA table_info(user_states)");
