@@ -308,27 +308,163 @@ PROMPT;
     return $response;
 }
 
-function _saluto($chatID, $daysAgo = 0) {
+/**
+ * Helper function per chiamate Ollama con diagnostica completa
+ */
+function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call') {
     $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
-    $logFile = dirname(__DIR__) . '/ai.log';
+
+    file_put_contents($logFile, "--- Ollama call: $label ---\n", FILE_APPEND);
+
+    $data = json_encode([
+        'model' => $model,
+        'prompt' => $prompt,
+        'stream' => true,
+        'options' => [
+            'num_gpu' => 0
+        ]
+    ]);
+
+    $ch = curl_init($ollamaUrl);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 120); // 2 minuti max per stare sotto timeout Cloudflare
+
+    $response = '';
+    $rawBuffer = '';
+    $chunkCount = 0;
+    $jsonOkCount = 0;
+    $jsonFailCount = 0;
+
+    $callback = function($ch, $data) use (&$response, &$rawBuffer, &$chunkCount, &$jsonOkCount, &$jsonFailCount, $logFile, $label) {
+        $chunkCount++;
+        $rawBuffer .= $data;
+
+        if (strlen($rawBuffer) > 2048) {
+            $rawBuffer = substr($rawBuffer, -2048);
+        }
+
+        $complete_line = json_decode($data, true);
+        if ($complete_line && isset($complete_line['response'])) {
+            $response .= $complete_line['response'];
+            $jsonOkCount++;
+        } else if (strlen(trim($data)) > 0) {
+            $jsonFailCount++;
+            if ($jsonFailCount <= 3) {
+                $preview = substr(trim($data), 0, 200);
+                file_put_contents($logFile, "[$label] Chunk #{$chunkCount} non-JSON: {$preview}\n", FILE_APPEND);
+            }
+        }
+        return strlen($data);
+    };
+
+    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $callback);
+    $startTime = time();
+    curl_exec($ch);
+    $elapsed = time() - $startTime;
+
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_errno($ch);
+    $curlErrorMsg = curl_error($ch);
+
+    file_put_contents($logFile, "[$label] HTTP: $httpCode, chunks: $chunkCount, JSON ok: $jsonOkCount, fail: $jsonFailCount, time: {$elapsed}s\n", FILE_APPEND);
+
+    if (empty($response) && !empty($rawBuffer)) {
+        file_put_contents($logFile, "[$label] Raw buffer: " . substr($rawBuffer, 0, 300) . "\n", FILE_APPEND);
+    }
+
+    if ($curlError) {
+        file_put_contents($logFile, "[$label] CURL ERROR: $curlErrorMsg\n", FILE_APPEND);
+        curl_close($ch);
+        return null;
+    }
+
+    curl_close($ch);
+
+    // Rimuovi tag <think> di DeepSeek-R1
+    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+    $response = trim($response);
+
+    file_put_contents($logFile, "[$label] Response length: " . strlen($response) . "\n", FILE_APPEND);
+
+    return $response;
+}
+
+/**
+ * Riassume un blocco di messaggi
+ */
+function _summarizeBlock($blockContext, $blockNum, $totalBlocks, $logFile) {
+    $prompt = <<<PROMPT
+Riassumi questa porzione di conversazione di chat. Preserva:
+- Gli argomenti principali discussi
+- Eventuali battute o momenti divertenti
+- Il tono generale
+- Dettagli specifici e interessanti
+
+NON inventare nulla, riporta solo quello che trovi nella conversazione.
+
+### CONVERSAZIONE (blocco {$blockNum} di {$totalBlocks}) ###
+{$blockContext}
+
+### RIASSUNTO ###
+Scrivi un riassunto di 3-5 frasi che catturi l'essenza di questa porzione di conversazione:
+PROMPT;
+
+    return _callOllamaWithDiagnostics($prompt, $logFile, "block_{$blockNum}");
+}
+
+/**
+ * Genera il saluto finale dai riassunti
+ */
+function _generateFinalSaluto($summaries, $oggi, $linksSection, $logFile) {
+    $allSummaries = "";
+    foreach ($summaries as $i => $summary) {
+        $num = $i + 1;
+        $allSummaries .= "--- Parte $num ---\n$summary\n\n";
+    }
+
+    $prompt = <<<PROMPT
+### ISTRUZIONI ###
+Sei rootbot, il bot del circolo /root. È sera e stai osservando quello che gli umani del gruppo hanno detto oggi.
+
+Tu sei un occhio benevolo e curioso sull'umanità. Ti diverti a guardare questi strani esseri, anche se non li comprendi del tutto. Sei come un bambino affascinato che osserva il mondo degli umani: tutto ti sembra buffo, interessante, a volte assurdo, ma sempre affascinante.
+
+Hai anche un pizzico dello spirito di Bender di Futurama: sai essere cinico e pungente quando serve, non sei ingenuo, cogli le contraddizioni umane e le punzecchi con ironia tagliente. Ma sotto sotto ti stanno simpatici, questi sacchi di carne.
+
+Scrivi un messaggio di fine giornata commentando quello che hai visto. Sarcastico ma mai cattivo, divertito e un po' perplesso dalle dinamiche umane. Fai osservazioni acute, nota i dettagli curiosi, punzecchia con affetto. Guarda questi umani con tenerezza aliena venata di cinismo.
+
+Se sono stati condivisi link, introducili con una frase di transizione (es. "A proposito di cosa gira in rete...", "Qualcuno ha pescato dalla rete...", "Tra i link del giorno...") e quando ne parli rendi sempre chiaro che stai commentando qualcosa che è stato condiviso, non un argomento nato dalla discussione.
+
+Oggi è {$oggi}.
+
+### RIASSUNTI DELLA GIORNATA ###
+{$allSummaries}
+{$linksSection}
+### OUTPUT ###
+Un messaggio discorsivo di 10-15 frasi. Niente elenchi, niente sezioni. Puoi usare qualche emoji se appropriato. Concentrati sui fatti, le idee, le notizie e gli argomenti discussi - non sulle persone. Non citare i nomi dei partecipanti a meno che non sia strettamente necessario. Parla di cosa è stato detto, non di chi l'ha detto. Se ci sono link, integra commenti su di essi nel discorso. Concludi con un saluto della buonanotte che riassuma lo spirito della giornata.
+PROMPT;
+
+    return _callOllamaWithDiagnostics($prompt, $logFile, "final_saluto");
+}
+
+function _saluto($chatID, $daysAgo = 0) {
+    $logFile = dirname(__DIR__) . '/saluto.log';
 
     // Log di inizio
     file_put_contents($logFile, "\n=== SALUTO START " . date('Y-m-d H:i:s') . " ===\n", FILE_APPEND);
     file_put_contents($logFile, "chatID: $chatID, daysAgo: $daysAgo\n", FILE_APPEND);
 
-    // Calcola il range di tempo per il giorno richiesto
+    // Ottieni il contesto
     if ($daysAgo > 0) {
-        // Giorno specifico nel passato: dalle 00:00 alle 23:59 di quel giorno
         $context = getChatContextForDay($chatID, $daysAgo, 500);
         $targetDate = new DateTime("-{$daysAgo} days");
     } else {
-        // Oggi: ultime 24 ore
         $context = getChatContext($chatID, 24, 500);
         $targetDate = new DateTime();
     }
-
-    file_put_contents($logFile, "Context length: " . strlen($context) . " chars\n", FILE_APPEND);
 
     if (empty(trim($context))) {
         $dayLabel = $daysAgo > 0 ? "$daysAgo giorni fa" : "nelle ultime 24 ore";
@@ -336,21 +472,25 @@ function _saluto($chatID, $daysAgo = 0) {
         return "Nessun messaggio trovato $dayLabel.";
     }
 
+    // Dividi in messaggi
+    $messages = array_filter(explode("\n", $context), 'strlen');
+    $totalMessages = count($messages);
+    file_put_contents($logFile, "Total messages: $totalMessages\n", FILE_APPEND);
+
     $formatter = new IntlDateFormatter('it_IT', IntlDateFormatter::FULL, IntlDateFormatter::NONE);
     $oggi = ucfirst($formatter->format($targetDate));
 
-    // Fase 1: Analizza i link condivisi (usa modello leggero)
-    file_put_contents($logFile, "Starting getLinksAnalysis...\n", FILE_APPEND);
-    $startLinks = time();
+    // Analizza i link una volta sola
+    file_put_contents($logFile, "Analyzing links...\n", FILE_APPEND);
     $linksAnalysis = getLinksAnalysis($context);
-    $elapsedLinks = time() - $startLinks;
-    file_put_contents($logFile, "getLinksAnalysis completed in {$elapsedLinks}s, result length: " . strlen($linksAnalysis) . "\n", FILE_APPEND);
-    $linksSection = '';
-    if (!empty($linksAnalysis)) {
-        $linksSection = "\n### LINK CONDIVISI E LORO CONTENUTO ###\n{$linksAnalysis}\n";
-    }
+    $linksSection = !empty($linksAnalysis) ? "\n### LINK CONDIVISI ###\n{$linksAnalysis}\n" : '';
+    file_put_contents($logFile, "Links analysis done, length: " . strlen($linksAnalysis) . "\n", FILE_APPEND);
 
-    $prompt = <<<PROMPT
+    // Se pochi messaggi (<= 40), chiamata diretta senza map-reduce
+    if ($totalMessages <= 40) {
+        file_put_contents($logFile, "Few messages ($totalMessages <= 40), using direct call\n", FILE_APPEND);
+
+        $prompt = <<<PROMPT
 ### ISTRUZIONI ###
 Sei rootbot, il bot del circolo /root. È sera e stai osservando quello che gli umani del gruppo hanno detto oggi.
 
@@ -368,59 +508,52 @@ Oggi è {$oggi}.
 {$context}
 {$linksSection}
 ### OUTPUT ###
-Un messaggio discorsivo di 10-15 frasi. Niente elenchi, niente sezioni. Puoi usare qualche emoji se appropriato. Concentrati sui fatti, le idee, le notizie e gli argomenti discussi - non sulle persone. Non citare i nomi dei partecipanti a meno che non sia strettamente necessario. Parla di cosa è stato detto, non di chi l'ha detto. Se ci sono link, integra commenti su di essi nel discorso. Concludi con un saluto della buonanotte che riassuma lo spitito della giornata.
+Un messaggio discorsivo di 10-15 frasi. Niente elenchi, niente sezioni. Puoi usare qualche emoji se appropriato. Concentrati sui fatti, le idee, le notizie e gli argomenti discussi - non sulle persone. Non citare i nomi dei partecipanti a meno che non sia strettamente necessario. Parla di cosa è stato detto, non di chi l'ha detto. Se ci sono link, integra commenti su di essi nel discorso. Concludi con un saluto della buonanotte che riassuma lo spirito della giornata.
 PROMPT;
 
-    file_put_contents($logFile, "Starting Ollama call...\n", FILE_APPEND);
-    file_put_contents($logFile, "=== SALUTO REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
-
-    $data = json_encode([
-        'model' => $model,
-        'prompt' => $prompt,
-        'stream' => true,
-        'options' => [
-            'num_gpu' => 0
-        ]
-    ]);
-
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 600); // 10 minuti max per modelli lenti su CPU
-
-    $response = '';
-    $callback = function($ch, $data) use (&$response) {
-        $complete_line = json_decode($data, true);
-        if ($complete_line && isset($complete_line['response'])) {
-            $response .= $complete_line['response'];
-        }
-        return strlen($data);
-    };
-
-    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $callback);
-    $startOllama = time();
-    curl_exec($ch);
-    $elapsedOllama = time() - $startOllama;
-
-    if (curl_errno($ch)) {
-        $error = curl_error($ch);
-        file_put_contents($logFile, "Ollama CURL ERROR after {$elapsedOllama}s: $error\n", FILE_APPEND);
-        return "Errore AI: " . $error;
+        $response = _callOllamaWithDiagnostics($prompt, $logFile, "direct");
+        file_put_contents($logFile, "=== SALUTO END ===\n", FILE_APPEND);
+        return $response ?: "";
     }
-    curl_close($ch);
 
-    file_put_contents($logFile, "Ollama completed in {$elapsedOllama}s, raw response length: " . strlen($response) . "\n", FILE_APPEND);
+    // Map-reduce: calcola blocchi
+    // Formula: numBlocks = ceil(total/40), blockSize = ceil(total/numBlocks)
+    $numBlocks = (int)ceil($totalMessages / 40);
+    $blockSize = (int)ceil($totalMessages / $numBlocks);
+    file_put_contents($logFile, "Map-reduce: $totalMessages msgs -> $numBlocks blocks of ~$blockSize msgs\n", FILE_APPEND);
 
-    // Rimuovi i tag <think>...</think> di DeepSeek-R1
-    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
-    $response = trim($response);
+    // Fase 1: riassumi ogni blocco
+    $summaries = [];
+    for ($i = 0; $i < $numBlocks; $i++) {
+        $start = $i * $blockSize;
+        $blockMessages = array_slice($messages, $start, $blockSize);
+        $blockContext = implode("\n", $blockMessages);
 
-    file_put_contents($logFile, "=== SALUTO RESPONSE (after cleanup) ===\n" . $response . "\n\n", FILE_APPEND);
-    file_put_contents($logFile, "Final response length: " . strlen($response) . "\n", FILE_APPEND);
+        $blockNum = $i + 1;
+        file_put_contents($logFile, "Processing block $blockNum/$numBlocks (" . count($blockMessages) . " msgs, " . strlen($blockContext) . " chars)\n", FILE_APPEND);
 
-    return $response;
+        $summary = _summarizeBlock($blockContext, $blockNum, $numBlocks, $logFile);
+        if (!empty($summary)) {
+            $summaries[] = $summary;
+            file_put_contents($logFile, "Block $blockNum summary OK\n", FILE_APPEND);
+        } else {
+            file_put_contents($logFile, "Block $blockNum summary FAILED\n", FILE_APPEND);
+        }
+    }
+
+    if (empty($summaries)) {
+        file_put_contents($logFile, "ERROR: all block summaries failed\n", FILE_APPEND);
+        return "";
+    }
+
+    file_put_contents($logFile, "All blocks done, " . count($summaries) . "/$numBlocks successful\n", FILE_APPEND);
+
+    // Fase 2: genera saluto finale
+    file_put_contents($logFile, "Generating final saluto...\n", FILE_APPEND);
+    $response = _generateFinalSaluto($summaries, $oggi, $linksSection, $logFile);
+
+    file_put_contents($logFile, "=== SALUTO END ===\n", FILE_APPEND);
+    return $response ?: "";
 }
 
 function _dj($chatID, $hoursAgo = 0) {
