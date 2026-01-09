@@ -1039,7 +1039,7 @@ function summarizeUrl($url, $title, $description) {
     $prompt = "Riassumi in 1-2 frasi brevi di cosa parla questa pagina web.\nTitolo: {$title}\nDescrizione: {$description}\nURL: {$url}\n\nRiassunto:";
 
     $data = json_encode([
-        'model' => 'gemma3:4b',
+        'model' => OLLAMA_MODEL_LIGHT,
         'prompt' => $prompt,
         'stream' => false,
         'options' => [
