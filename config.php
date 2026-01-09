@@ -7,6 +7,7 @@ define('IMAGE_SAVE_PATH', __DIR__ . '/images/');
 define('OLLAMA_URL','http://188.153.196.133:11434/api/generate');
 define('OLLAMA_MODEL','deepseek-r1:14b');
 define('OLLAMA_MODEL_LIGHT','gemma3:4b');  // Modello leggero per classificazioni veloci
+define('OLLAMA_MODEL_VISION','gemma3:12b');  // Modello multimodale per analisi immagini
 
 define('SILENCE_DURATION', 120); // Durata del silenzio in secondi (2 minuti)
 define('RESPONSE_PROBABILITY', 0.8); // Probabilità di risposta (80%)

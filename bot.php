@@ -35,15 +35,41 @@ file_put_contents('debug.log', print_r($update, true) . "\n\n", FILE_APPEND);
 if (isset($update['message'])) {
 	$message = $update['message'];
     processMessage($message);
-    //saveMessageToContext($chatID, $firstName, $text);
-    
+
     $groupId = $message['chat']['id'];
-    $messageText = $message['text'] ?? '';
     $userName = $message['from']['first_name'] ?? 'Utente';
+
+    // Gestisci testo
+    $messageText = $message['text'] ?? '';
     $messageText = str_replace('@bot', '', $messageText);
     $messageText = str_replace('@rootbot', '', $messageText);
     $messageText = str_replace('@root', '', $messageText);
-    saveMessageToContext($groupId, $userName, $messageText);
+
+    // Gestisci immagini: analizza e aggiungi descrizione al contesto
+    if (isset($message['photo'])) {
+        $photos = $message['photo'];
+        $fileId = $photos[count($photos) - 1]['file_id']; // Prendi la versione più grande
+        $caption = $message['caption'] ?? '';
+
+        // Analizza l'immagine con AI vision
+        $imageDescription = analyzeImage($fileId);
+
+        if ($imageDescription) {
+            $messageText = "[immagine: $imageDescription]";
+            if ($caption) {
+                $messageText .= " $caption";
+            }
+        } elseif ($caption) {
+            $messageText = "[immagine] $caption";
+        } else {
+            $messageText = "[immagine]";
+        }
+    }
+
+    // Salva nel contesto solo se c'è contenuto
+    if (!empty(trim($messageText))) {
+        saveMessageToContext($groupId, $userName, $messageText);
+    }
 } elseif (isset($update['edited_message'])) {
     // Ignora i messaggi editati per evitare risposte duplicate
 } elseif (isset($update['callback_query'])) {

@@ -3,6 +3,69 @@
 ////////////////////// GESTIONE CHAT CON AI ////////////////////
 ////////////////////////////////////////////////////////////////
 
+/**
+ * Analizza un'immagine con Ollama multimodale
+ * @param string $fileId ID del file Telegram
+ * @return string|null Descrizione dell'immagine o null se fallisce
+ */
+function analyzeImage($fileId) {
+    // Ottieni info file da Telegram
+    $fileInfo = makeAPIRequest('getFile', ['file_id' => $fileId]);
+    if (!$fileInfo['ok']) {
+        error_log("analyzeImage: getFile failed");
+        return null;
+    }
+
+    // Scarica l'immagine
+    $fileUrl = "https://api.telegram.org/file/bot" . BOT_TOKEN . "/" . $fileInfo['result']['file_path'];
+    $imageContent = @file_get_contents($fileUrl);
+    if (!$imageContent) {
+        error_log("analyzeImage: download failed");
+        return null;
+    }
+
+    // Converti in base64
+    $imageBase64 = base64_encode($imageContent);
+
+    // Chiama Ollama con modello vision
+    $data = json_encode([
+        'model' => OLLAMA_MODEL_VISION,
+        'prompt' => "Descrivi brevemente questa immagine in italiano, in 1-2 frasi. Sii conciso.",
+        'images' => [$imageBase64],
+        'stream' => false,
+        'options' => [
+            'num_gpu' => 0
+        ]
+    ]);
+
+    $ch = curl_init(OLLAMA_URL);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($httpCode !== 200 || !$response) {
+        error_log("analyzeImage: Ollama call failed, HTTP $httpCode");
+        return null;
+    }
+
+    $result = json_decode($response, true);
+    $description = $result['response'] ?? null;
+
+    if ($description) {
+        // Rimuovi tag <think> se presenti
+        $description = preg_replace('/<think>.*?<\/think>/s', '', $description);
+        $description = trim($description);
+    }
+
+    return $description;
+}
+
 function saveMessageToContext($groupId, $userName, $messageText) {
     global $db;
 
