@@ -18,6 +18,18 @@ $update = json_decode(file_get_contents('php://input'), true);
 
 file_put_contents('debug.log', print_r($update, true) . "\n\n", FILE_APPEND);
 
+// Rispondi subito 200 a Telegram per evitare timeout e retry
+http_response_code(200);
+header('Connection: close');
+header('Content-Length: 0');
+ob_end_flush();
+flush();
+
+// Se disponibile, chiudi la connessione FastCGI e continua in background
+if (function_exists('fastcgi_finish_request')) {
+    fastcgi_finish_request();
+}
+
 
 
 
@@ -50,14 +62,21 @@ if (isset($update['message'])) {
         $photos = $message['photo'];
         $fileId = $photos[count($photos) - 1]['file_id']; // Prendi la versione più grande
         $caption = $message['caption'] ?? '';
+        $chatType = $message['chat']['type'];
 
-        // Analizza l'immagine con AI vision
-        $imageDescription = analyzeImage($fileId);
+        // Analizza l'immagine con AI vision (passa anche la caption per contesto)
+        $imageDescription = analyzeImage($fileId, $caption);
 
         if ($imageDescription) {
             $messageText = "[immagine: $imageDescription]";
-            if ($caption) {
-                $messageText .= " $caption";
+
+            // In chat privata con caption, rispondi con l'analisi
+            if ($chatType == 'private' && !empty($caption)) {
+                makeAPIRequest('sendMessage', [
+                    'chat_id' => $groupId,
+                    'text' => $imageDescription,
+                    'reply_to_message_id' => $message['message_id']
+                ]);
             }
         } elseif ($caption) {
             $messageText = "[immagine] $caption";
@@ -115,8 +134,5 @@ if (isset($update['message'])) {
         handleAnnulloOspiteCallback($callbackQuery);
     }
 }
-
-http_response_code(200);
-
 
 ?>

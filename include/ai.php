@@ -6,9 +6,10 @@
 /**
  * Analizza un'immagine con Ollama multimodale
  * @param string $fileId ID del file Telegram
+ * @param string $caption Eventuale didascalia allegata all'immagine
  * @return string|null Descrizione dell'immagine o null se fallisce
  */
-function analyzeImage($fileId) {
+function analyzeImage($fileId, $caption = '') {
     // Ottieni info file da Telegram
     $fileInfo = makeAPIRequest('getFile', ['file_id' => $fileId]);
     if (!$fileInfo['ok']) {
@@ -27,16 +28,23 @@ function analyzeImage($fileId) {
     // Converti in base64
     $imageBase64 = base64_encode($imageContent);
 
+    // Costruisci il prompt, includendo la caption se presente
+    $prompt = "Descrivi questa immagine in italiano in modo dettagliato. Includi: soggetto principale, colori, ambiente/sfondo, eventuali testi visibili. Se è un meme o un'immagine umoristica, spiega il contesto culturale e perché dovrebbe essere divertente. 3-5 frasi.";
+    if (!empty($caption)) {
+        $prompt .= "\n\nL'utente ha aggiunto questo commento: \"$caption\"";
+    }
+
     // Chiama Ollama con modello vision
-    $data = json_encode([
+    $requestData = [
         'model' => OLLAMA_MODEL_VISION,
-        'prompt' => "Descrivi questa immagine in italiano in modo dettagliato. Includi: soggetto principale, colori, ambiente/sfondo, eventuali testi visibili. Se è un meme o un'immagine umoristica, spiega il contesto culturale e perché dovrebbe essere divertente. 3-5 frasi.",
+        'prompt' => $prompt,
         'images' => [$imageBase64],
-        'stream' => false,
-        'options' => [
-            'num_gpu' => 0
-        ]
-    ]);
+        'stream' => false
+    ];
+    if (!OLLAMA_MODEL_VISION_GPU) {
+        $requestData['options'] = ['num_gpu' => 0];
+    }
+    $data = json_encode($requestData);
 
     $ch = curl_init(OLLAMA_URL);
     curl_setopt($ch, CURLOPT_POST, 1);
@@ -307,14 +315,15 @@ PROMPT;
 
 	file_put_contents(dirname(__DIR__) . '/ai.log', print_r($prompt, true) . "\n\n", FILE_APPEND);
 
-    $data = json_encode([
+    $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true,
-        'options' => [
-            'num_gpu' => 0  // Forza CPU/RAM per non interferire con altri modelli in GPU
-        ]
-    ]);
+        'stream' => true
+    ];
+    if (!OLLAMA_MODEL_GPU) {
+        $requestData['options'] = ['num_gpu' => 0];
+    }
+    $data = json_encode($requestData);
 
     $ch = curl_init($ollamaUrl);
     curl_setopt($ch, CURLOPT_POST, 1);
@@ -381,14 +390,15 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout
 
     file_put_contents($logFile, "--- Ollama call: $label (timeout: {$timeout}s) ---\n", FILE_APPEND);
 
-    $data = json_encode([
+    $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true,
-        'options' => [
-            'num_gpu' => 0
-        ]
-    ]);
+        'stream' => true
+    ];
+    if (!OLLAMA_MODEL_GPU) {
+        $requestData['options'] = ['num_gpu' => 0];
+    }
+    $data = json_encode($requestData);
 
     $ch = curl_init($ollamaUrl);
     curl_setopt($ch, CURLOPT_POST, 1);
@@ -786,14 +796,15 @@ PROMPT;
 
     file_put_contents(dirname(__DIR__) . '/ai.log', "=== DJ REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
 
-    $data = json_encode([
+    $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true,
-        'options' => [
-            'num_gpu' => 0
-        ]
-    ]);
+        'stream' => true
+    ];
+    if (!OLLAMA_MODEL_GPU) {
+        $requestData['options'] = ['num_gpu' => 0];
+    }
+    $data = json_encode($requestData);
 
     $ch = curl_init($ollamaUrl);
     curl_setopt($ch, CURLOPT_POST, 1);
@@ -1101,14 +1112,15 @@ function summarizeUrl($url, $title, $description) {
 
     $prompt = "Riassumi in 1-2 frasi brevi di cosa parla questa pagina web.\nTitolo: {$title}\nDescrizione: {$description}\nURL: {$url}\n\nRiassunto:";
 
-    $data = json_encode([
+    $requestData = [
         'model' => OLLAMA_MODEL_LIGHT,
         'prompt' => $prompt,
-        'stream' => false,
-        'options' => [
-            'num_gpu' => 0
-        ]
-    ]);
+        'stream' => false
+    ];
+    if (!OLLAMA_MODEL_LIGHT_GPU) {
+        $requestData['options'] = ['num_gpu' => 0];
+    }
+    $data = json_encode($requestData);
 
     $ch = curl_init($ollamaUrl);
     curl_setopt($ch, CURLOPT_POST, 1);
@@ -1226,14 +1238,15 @@ Rispondi in modo breve, amichevole e un po' ironico (sei pur sempre un bot con u
 Suggerisci il comando corretto. Se non riesci a capire cosa l'utente volesse fare, elenca i comandi più comuni. Massimo 3-4 frasi.
 PROMPT;
 
-    $data = json_encode([
+    $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true,
-        'options' => [
-            'num_gpu' => 0
-        ]
-    ]);
+        'stream' => true
+    ];
+    if (!OLLAMA_MODEL_GPU) {
+        $requestData['options'] = ['num_gpu' => 0];
+    }
+    $data = json_encode($requestData);
 
     $ch = curl_init($ollamaUrl);
     curl_setopt($ch, CURLOPT_POST, 1);
