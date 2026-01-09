@@ -45,11 +45,10 @@ if (function_exists('fastcgi_finish_request')) {
 
 
 if (isset($update['message'])) {
-	$message = $update['message'];
-    processMessage($message);
-
+    $message = $update['message'];
     $groupId = $message['chat']['id'];
     $userName = $message['from']['first_name'] ?? 'Utente';
+    $chatType = $message['chat']['type'];
 
     // Gestisci testo
     $messageText = $message['text'] ?? '';
@@ -57,12 +56,12 @@ if (isset($update['message'])) {
     $messageText = str_replace('@rootbot', '', $messageText);
     $messageText = str_replace('@root', '', $messageText);
 
-    // Gestisci immagini: analizza e aggiungi descrizione al contesto
+    // PRIMA: Gestisci immagini - analizza e salva nel contesto PRIMA di processMessage
+    // Così l'AI avrà il contesto dell'immagine quando risponde
     if (isset($message['photo'])) {
         $photos = $message['photo'];
         $fileId = $photos[count($photos) - 1]['file_id']; // Prendi la versione più grande
         $caption = $message['caption'] ?? '';
-        $chatType = $message['chat']['type'];
 
         // Analizza l'immagine con AI vision (passa anche la caption per contesto)
         $imageDescription = analyzeImage($fileId, $caption);
@@ -70,8 +69,17 @@ if (isset($update['message'])) {
         if ($imageDescription) {
             $messageText = "[immagine: $imageDescription]";
 
-            // In chat privata con caption, rispondi con l'analisi
-            if ($chatType == 'private' && !empty($caption)) {
+            // Controlla se la caption menziona il bot
+            $captionMentionsBot = !empty($caption) && (
+                preg_match('/@root\b/', $caption) ||
+                preg_match('/@bot\b/', $caption) ||
+                preg_match('/@rootbot\b/', $caption) ||
+                preg_match('/\brootbot\b/i', $caption) ||
+                preg_match('/\brotbotbot\b/i', $caption)
+            );
+
+            // Rispondi con l'analisi in chat privata o quando menzionato nel gruppo
+            if ($chatType == 'private' || $captionMentionsBot) {
                 makeAPIRequest('sendMessage', [
                     'chat_id' => $groupId,
                     'text' => $imageDescription,
@@ -85,10 +93,52 @@ if (isset($update['message'])) {
         }
     }
 
-    // Salva nel contesto solo se c'è contenuto
+    // Gestisci documenti immagine (inviati senza compressione)
+    if (isset($message['document'])) {
+        file_put_contents('debug.log', "=== DOCUMENT DETECTED ===\n", FILE_APPEND);
+        file_put_contents('debug.log', "mime=" . ($message['document']['mime_type'] ?? 'none') . "\n", FILE_APPEND);
+        file_put_contents('debug.log', "isImageDocument=" . (isImageDocument($message['document']) ? 'YES' : 'NO') . "\n", FILE_APPEND);
+    }
+    if (isset($message['document']) && isImageDocument($message['document'])) {
+        $fileId = $message['document']['file_id'];
+        $caption = $message['caption'] ?? '';
+        file_put_contents('debug.log', "Processing document image, caption=" . substr($caption, 0, 50) . "\n", FILE_APPEND);
+
+        $imageDescription = analyzeImage($fileId, $caption);
+        file_put_contents('debug.log', "analyzeImage returned: " . ($imageDescription ? "OK (" . strlen($imageDescription) . " chars)" : "NULL") . "\n", FILE_APPEND);
+
+        if ($imageDescription) {
+            $messageText = "[immagine: $imageDescription]";
+
+            $captionMentionsBot = !empty($caption) && (
+                preg_match('/@root\b/', $caption) ||
+                preg_match('/@bot\b/', $caption) ||
+                preg_match('/@rootbot\b/', $caption) ||
+                preg_match('/\brootbot\b/i', $caption) ||
+                preg_match('/\brotbotbot\b/i', $caption)
+            );
+
+            if ($chatType == 'private' || $captionMentionsBot) {
+                makeAPIRequest('sendMessage', [
+                    'chat_id' => $groupId,
+                    'text' => $imageDescription,
+                    'reply_to_message_id' => $message['message_id']
+                ]);
+            }
+        } elseif ($caption) {
+            $messageText = "[immagine] $caption";
+        } else {
+            $messageText = "[immagine]";
+        }
+    }
+
+    // Salva nel contesto PRIMA di processMessage (così l'AI ha il contesto aggiornato)
     if (!empty(trim($messageText))) {
         saveMessageToContext($groupId, $userName, $messageText);
     }
+
+    // POI: Processa il messaggio (comandi, AI, ecc.)
+    processMessage($message);
 } elseif (isset($update['edited_message'])) {
     // Ignora i messaggi editati per evitare risposte duplicate
 } elseif (isset($update['callback_query'])) {

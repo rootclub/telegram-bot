@@ -10,29 +10,65 @@
  * @return string|null Descrizione dell'immagine o null se fallisce
  */
 function analyzeImage($fileId, $caption = '') {
+    $logFile = dirname(__DIR__) . '/debug.log';
+    file_put_contents($logFile, "=== analyzeImage START ===\n", FILE_APPEND);
+    file_put_contents($logFile, "fileId=$fileId\n", FILE_APPEND);
+    file_put_contents($logFile, "caption=" . substr($caption, 0, 50) . "\n", FILE_APPEND);
+
     // Ottieni info file da Telegram
     $fileInfo = makeAPIRequest('getFile', ['file_id' => $fileId]);
     if (!$fileInfo['ok']) {
-        error_log("analyzeImage: getFile failed");
+        file_put_contents($logFile, "FAIL: getFile failed - " . json_encode($fileInfo) . "\n", FILE_APPEND);
         return null;
     }
+    file_put_contents($logFile, "getFile OK: " . $fileInfo['result']['file_path'] . "\n", FILE_APPEND);
 
     // Scarica l'immagine
     $fileUrl = "https://api.telegram.org/file/bot" . BOT_TOKEN . "/" . $fileInfo['result']['file_path'];
     $imageContent = @file_get_contents($fileUrl);
     if (!$imageContent) {
-        error_log("analyzeImage: download failed");
+        file_put_contents($logFile, "FAIL: download failed from $fileUrl\n", FILE_APPEND);
         return null;
+    }
+    file_put_contents($logFile, "Download OK: " . strlen($imageContent) . " bytes\n", FILE_APPEND);
+
+    // Converti formati non supportati (AVIF, WEBP, etc.) in JPEG
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    $mimeType = $finfo->buffer($imageContent);
+    file_put_contents($logFile, "Detected MIME: $mimeType\n", FILE_APPEND);
+
+    // Se non è JPEG o PNG, converti in JPEG
+    if (!in_array($mimeType, ['image/jpeg', 'image/png', 'image/gif'])) {
+        file_put_contents($logFile, "Converting to JPEG...\n", FILE_APPEND);
+        $img = @imagecreatefromstring($imageContent);
+        if ($img === false) {
+            file_put_contents($logFile, "FAIL: Cannot create image from string\n", FILE_APPEND);
+            return null;
+        }
+        ob_start();
+        imagejpeg($img, null, 90);
+        $imageContent = ob_get_clean();
+        imagedestroy($img);
+        file_put_contents($logFile, "Converted to JPEG: " . strlen($imageContent) . " bytes\n", FILE_APPEND);
     }
 
     // Converti in base64
     $imageBase64 = base64_encode($imageContent);
 
-    // Costruisci il prompt, includendo la caption se presente
-    $prompt = "Descrivi questa immagine in italiano in modo dettagliato. Includi: soggetto principale, colori, ambiente/sfondo, eventuali testi visibili. Se è un meme o un'immagine umoristica, spiega il contesto culturale e perché dovrebbe essere divertente. 3-5 frasi.";
-    if (!empty($caption)) {
-        $prompt .= "\n\nL'utente ha aggiunto questo commento: \"$caption\"";
+    // Costruisci il prompt
+    // Rimuovi le menzioni del bot dalla caption per vedere se c'è altro contenuto
+    $cleanCaption = trim(preg_replace('/@root\b|@bot\b|@rootbot\b|\brootbot\b|\brotbotbot\b/i', '', $caption));
+
+    if (!empty($cleanCaption)) {
+        // Se c'è contenuto oltre alla menzione, usa quello come prompt
+        $prompt = $cleanCaption;
+    } else {
+        // Caption vuota o solo menzione: descrivi l'immagine
+        $prompt = "Descrivi nel dettaglio cosa vedi menzionando se si tratta di una foto, un disegno, un render, ecc... Se ci sono scritte o testi, riportali tutti. Sii oggettivo, senza interpretazioni. Scrivi solo la descrizione dell'immagine senza preamboli e commenti.";
     }
+    file_put_contents($logFile, "Prompt: " . substr($prompt, 0, 100) . "\n", FILE_APPEND);
+
+    file_put_contents($logFile, "Calling Ollama model=" . OLLAMA_MODEL_VISION . ", GPU=" . (OLLAMA_MODEL_VISION_GPU ? 'YES' : 'NO') . "\n", FILE_APPEND);
 
     // Chiama Ollama con modello vision
     $requestData = [
@@ -58,19 +94,28 @@ function analyzeImage($fileId, $caption = '') {
     curl_close($ch);
 
     if ($httpCode !== 200 || !$response) {
-        error_log("analyzeImage: Ollama call failed, HTTP $httpCode");
+        file_put_contents($logFile, "FAIL: Ollama HTTP $httpCode\n", FILE_APPEND);
         return null;
     }
+    file_put_contents($logFile, "Ollama HTTP 200 OK\n", FILE_APPEND);
 
     $result = json_decode($response, true);
     $description = $result['response'] ?? null;
+
+    file_put_contents($logFile, "Ollama response length=" . strlen($description ?? '') . "\n", FILE_APPEND);
 
     if ($description) {
         // Rimuovi tag <think> se presenti
         $description = preg_replace('/<think>.*?<\/think>/s', '', $description);
         $description = trim($description);
+        file_put_contents($logFile, "After cleanup length=" . strlen($description) . "\n", FILE_APPEND);
     }
 
+    if (empty($description)) {
+        file_put_contents($logFile, "FAIL: EMPTY description after processing!\n", FILE_APPEND);
+    }
+
+    file_put_contents($logFile, "=== analyzeImage END ===\n", FILE_APPEND);
     return $description;
 }
 

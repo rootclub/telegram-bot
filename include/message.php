@@ -71,6 +71,7 @@ function sendPrivateResponse($userId, $text, $chatId = null) {
 function processMessage($message) {
     $chatID = $message['chat']['id'];
     $text = $message['text'] ?? '';
+    $caption = $message['caption'] ?? '';  // Caption per immagini/documenti
     $chatType = $message['chat']['type'];
     $fromId = $message['from']['id'];
     $firstName = $message['from']['first_name'] ?? 'Utente';
@@ -215,10 +216,13 @@ function processMessage($message) {
         $response = _annullo_smart($chatID, $fromId, $userName);
         
     } elseif (isset($message['photo'])) {
+        // Le immagini con menzione/privato sono già gestite in bot.php (invio descrizione)
+        // Qui gestiamo solo il caso normale (es. salvataggio per pappatoie)
         $response = handle_image($message);
 
     } elseif (isset($message['document']) && isImageDocument($message['document'])) {
         // L'utente ha inviato un'immagine come file (senza compressione)
+        // La risposta con descrizione è gestita in bot.php
         $response = handleDocumentImage($message);
 
     } elseif (isset($message['document']) && !isImageDocument($message['document'])) {
