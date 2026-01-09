@@ -30,7 +30,7 @@ function analyzeImage($fileId) {
     // Chiama Ollama con modello vision
     $data = json_encode([
         'model' => OLLAMA_MODEL_VISION,
-        'prompt' => "Descrivi brevemente questa immagine in italiano, in 1-2 frasi. Sii conciso.",
+        'prompt' => "Descrivi questa immagine in italiano in modo dettagliato. Includi: soggetto principale, colori, ambiente/sfondo, eventuali testi visibili. Se è un meme o un'immagine umoristica, spiega il contesto culturale e perché dovrebbe essere divertente. 3-5 frasi.",
         'images' => [$imageBase64],
         'stream' => false,
         'options' => [
