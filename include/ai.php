@@ -310,12 +310,13 @@ PROMPT;
 
 /**
  * Helper function per chiamate Ollama con diagnostica completa
+ * @param int $timeout Timeout in secondi (default 120 per blocchi, usare 300 per final)
  */
-function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call') {
+function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout = 120) {
     $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
 
-    file_put_contents($logFile, "--- Ollama call: $label ---\n", FILE_APPEND);
+    file_put_contents($logFile, "--- Ollama call: $label (timeout: {$timeout}s) ---\n", FILE_APPEND);
 
     $data = json_encode([
         'model' => $model,
@@ -331,7 +332,7 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call') {
     curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 120); // 2 minuti max per stare sotto timeout Cloudflare
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
 
     $response = '';
     $rawBuffer = '';
@@ -394,57 +395,50 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call') {
 }
 
 /**
- * Riassume un blocco di messaggi
+ * Riassume un blocco di messaggi in modo ultra-conciso
+ * @param array $blockLinks Info sui link presenti nel blocco (URL -> riassunto)
  */
-function _summarizeBlock($blockContext, $blockNum, $totalBlocks, $logFile) {
+function _summarizeBlock($blockContext, $blockNum, $totalBlocks, $blockLinks, $logFile) {
+    $linksInfo = '';
+    if (!empty($blockLinks)) {
+        $linkLines = [];
+        foreach ($blockLinks as $url => $summary) {
+            $linkLines[] = "- $summary";
+        }
+        $linksInfo = "\n\nLINK CONDIVISI IN QUESTO BLOCCO:\n" . implode("\n", $linkLines);
+    }
+
     $prompt = <<<PROMPT
-Riassumi questa porzione di conversazione di chat. Preserva:
-- Gli argomenti principali discussi
-- Eventuali battute o momenti divertenti
-- Il tono generale
-- Dettagli specifici e interessanti
+Estrai gli argomenti principali da questa chat. Output ULTRA-BREVE: massimo 3-4 punti, una riga ciascuno.
+Se ci sono link condivisi, includi brevemente di cosa parlano.
 
-NON inventare nulla, riporta solo quello che trovi nella conversazione.
+CONVERSAZIONE:
+{$blockContext}{$linksInfo}
 
-### CONVERSAZIONE (blocco {$blockNum} di {$totalBlocks}) ###
-{$blockContext}
-
-### RIASSUNTO ###
-Scrivi un riassunto di 3-5 frasi che catturi l'essenza di questa porzione di conversazione:
+ARGOMENTI (max 4 righe telegrafiche):
 PROMPT;
 
     return _callOllamaWithDiagnostics($prompt, $logFile, "block_{$blockNum}");
 }
 
 /**
- * Genera il saluto finale dai riassunti
+ * Genera il saluto finale dai riassunti (che già contengono info sui link)
  */
-function _generateFinalSaluto($summaries, $oggi, $linksSection, $logFile) {
-    $allSummaries = "";
-    foreach ($summaries as $i => $summary) {
-        $num = $i + 1;
-        $allSummaries .= "--- Parte $num ---\n$summary\n\n";
-    }
+function _generateFinalSaluto($summaries, $oggi, $logFile) {
+    $allSummaries = implode("\n", $summaries);
 
     $prompt = <<<PROMPT
-### ISTRUZIONI ###
-Sei rootbot, il bot del circolo /root. È sera e stai osservando quello che gli umani del gruppo hanno detto oggi.
+Sei rootbot, il bot del circolo /root. È sera e osservi quello che gli umani hanno detto oggi.
 
-Tu sei un occhio benevolo e curioso sull'umanità. Ti diverti a guardare questi strani esseri, anche se non li comprendi del tutto. Sei come un bambino affascinato che osserva il mondo degli umani: tutto ti sembra buffo, interessante, a volte assurdo, ma sempre affascinante.
-
-Hai anche un pizzico dello spirito di Bender di Futurama: sai essere cinico e pungente quando serve, non sei ingenuo, cogli le contraddizioni umane e le punzecchi con ironia tagliente. Ma sotto sotto ti stanno simpatici, questi sacchi di carne.
-
-Scrivi un messaggio di fine giornata commentando quello che hai visto. Sarcastico ma mai cattivo, divertito e un po' perplesso dalle dinamiche umane. Fai osservazioni acute, nota i dettagli curiosi, punzecchia con affetto. Guarda questi umani con tenerezza aliena venata di cinismo.
-
-Se sono stati condivisi link, introducili con una frase di transizione (es. "A proposito di cosa gira in rete...", "Qualcuno ha pescato dalla rete...", "Tra i link del giorno...") e quando ne parli rendi sempre chiaro che stai commentando qualcosa che è stato condiviso, non un argomento nato dalla discussione.
+Sei un occhio benevolo e curioso sull'umanità, con un pizzico di Bender di Futurama: cinico ma affettuoso, ironico ma mai cattivo.
 
 Oggi è {$oggi}.
 
-### RIASSUNTI DELLA GIORNATA ###
+ARGOMENTI DELLA GIORNATA:
 {$allSummaries}
-{$linksSection}
-### OUTPUT ###
-Un messaggio discorsivo di 10-15 frasi. Niente elenchi, niente sezioni. Puoi usare qualche emoji se appropriato. Concentrati sui fatti, le idee, le notizie e gli argomenti discussi - non sulle persone. Non citare i nomi dei partecipanti a meno che non sia strettamente necessario. Parla di cosa è stato detto, non di chi l'ha detto. Se ci sono link, integra commenti su di essi nel discorso. Concludi con un saluto della buonanotte che riassuma lo spirito della giornata.
+
+OUTPUT:
+Scrivi un messaggio di buonanotte di 8-12 frasi. Commenta gli argomenti con tono sarcastico e divertito. Niente elenchi. Concludi con un saluto.
 PROMPT;
 
     return _callOllamaWithDiagnostics($prompt, $logFile, "final_saluto");
@@ -480,35 +474,36 @@ function _saluto($chatID, $daysAgo = 0) {
     $formatter = new IntlDateFormatter('it_IT', IntlDateFormatter::FULL, IntlDateFormatter::NONE);
     $oggi = ucfirst($formatter->format($targetDate));
 
-    // Analizza i link una volta sola
-    file_put_contents($logFile, "Analyzing links...\n", FILE_APPEND);
-    $linksAnalysis = getLinksAnalysis($context);
-    $linksSection = !empty($linksAnalysis) ? "\n### LINK CONDIVISI ###\n{$linksAnalysis}\n" : '';
-    file_put_contents($logFile, "Links analysis done, length: " . strlen($linksAnalysis) . "\n", FILE_APPEND);
+    // Pre-analizza tutti i link (una chiamata LLM per link)
+    file_put_contents($logFile, "Pre-analyzing links...\n", FILE_APPEND);
+    $linkMap = preAnalyzeLinks($context, $logFile);
 
     // Se pochi messaggi (<= 40), chiamata diretta senza map-reduce
     if ($totalMessages <= 40) {
         file_put_contents($logFile, "Few messages ($totalMessages <= 40), using direct call\n", FILE_APPEND);
 
+        // Prepara info link per il prompt
+        $linksInfo = '';
+        if (!empty($linkMap)) {
+            $linkLines = [];
+            foreach ($linkMap as $url => $summary) {
+                $linkLines[] = "- $summary";
+            }
+            $linksInfo = "\n\nLINK CONDIVISI:\n" . implode("\n", $linkLines);
+        }
+
         $prompt = <<<PROMPT
-### ISTRUZIONI ###
-Sei rootbot, il bot del circolo /root. È sera e stai osservando quello che gli umani del gruppo hanno detto oggi.
+Sei rootbot, il bot del circolo /root. È sera e osservi quello che gli umani hanno detto oggi.
 
-Tu sei un occhio benevolo e curioso sull'umanità. Ti diverti a guardare questi strani esseri, anche se non li comprendi del tutto. Sei come un bambino affascinato che osserva il mondo degli umani: tutto ti sembra buffo, interessante, a volte assurdo, ma sempre affascinante.
-
-Hai anche un pizzico dello spirito di Bender di Futurama: sai essere cinico e pungente quando serve, non sei ingenuo, cogli le contraddizioni umane e le punzecchi con ironia tagliente. Ma sotto sotto ti stanno simpatici, questi sacchi di carne.
-
-Scrivi un messaggio di fine giornata commentando quello che hai visto. Sarcastico ma mai cattivo, divertito e un po' perplesso dalle dinamiche umane. Fai osservazioni acute, nota i dettagli curiosi, punzecchia con affetto. Guarda questi umani con tenerezza aliena venata di cinismo.
-
-Se sono stati condivisi link, introducili con una frase di transizione (es. "A proposito di cosa gira in rete...", "Qualcuno ha pescato dalla rete...", "Tra i link del giorno...") e quando ne parli rendi sempre chiaro che stai commentando qualcosa che è stato condiviso, non un argomento nato dalla discussione.
+Sei un occhio benevolo e curioso sull'umanità, con un pizzico di Bender di Futurama: cinico ma affettuoso, ironico ma mai cattivo.
 
 Oggi è {$oggi}.
 
-### CONVERSAZIONE DELLA GIORNATA ###
-{$context}
-{$linksSection}
-### OUTPUT ###
-Un messaggio discorsivo di 10-15 frasi. Niente elenchi, niente sezioni. Puoi usare qualche emoji se appropriato. Concentrati sui fatti, le idee, le notizie e gli argomenti discussi - non sulle persone. Non citare i nomi dei partecipanti a meno che non sia strettamente necessario. Parla di cosa è stato detto, non di chi l'ha detto. Se ci sono link, integra commenti su di essi nel discorso. Concludi con un saluto della buonanotte che riassuma lo spirito della giornata.
+CONVERSAZIONE:
+{$context}{$linksInfo}
+
+OUTPUT:
+Scrivi un messaggio di buonanotte di 8-12 frasi. Commenta gli argomenti con tono sarcastico e divertito. Niente elenchi. Concludi con un saluto.
 PROMPT;
 
         $response = _callOllamaWithDiagnostics($prompt, $logFile, "direct");
@@ -529,10 +524,19 @@ PROMPT;
         $blockMessages = array_slice($messages, $start, $blockSize);
         $blockContext = implode("\n", $blockMessages);
 
-        $blockNum = $i + 1;
-        file_put_contents($logFile, "Processing block $blockNum/$numBlocks (" . count($blockMessages) . " msgs, " . strlen($blockContext) . " chars)\n", FILE_APPEND);
+        // Trova i link presenti in questo blocco
+        $blockLinks = [];
+        foreach ($linkMap as $url => $summary) {
+            if (strpos($blockContext, $url) !== false) {
+                $blockLinks[$url] = $summary;
+            }
+        }
 
-        $summary = _summarizeBlock($blockContext, $blockNum, $numBlocks, $logFile);
+        $blockNum = $i + 1;
+        $linkCount = count($blockLinks);
+        file_put_contents($logFile, "Processing block $blockNum/$numBlocks (" . count($blockMessages) . " msgs, $linkCount links)\n", FILE_APPEND);
+
+        $summary = _summarizeBlock($blockContext, $blockNum, $numBlocks, $blockLinks, $logFile);
         if (!empty($summary)) {
             $summaries[] = $summary;
             file_put_contents($logFile, "Block $blockNum summary OK\n", FILE_APPEND);
@@ -550,7 +554,7 @@ PROMPT;
 
     // Fase 2: genera saluto finale
     file_put_contents($logFile, "Generating final saluto...\n", FILE_APPEND);
-    $response = _generateFinalSaluto($summaries, $oggi, $linksSection, $logFile);
+    $response = _generateFinalSaluto($summaries, $oggi, $logFile);
 
     file_put_contents($logFile, "=== SALUTO END ===\n", FILE_APPEND);
     return $response ?: "";
@@ -1035,7 +1039,7 @@ function summarizeUrl($url, $title, $description) {
     $prompt = "Riassumi in 1-2 frasi brevi di cosa parla questa pagina web.\nTitolo: {$title}\nDescrizione: {$description}\nURL: {$url}\n\nRiassunto:";
 
     $data = json_encode([
-        'model' => 'llama3.2:3b',
+        'model' => 'gemma3:4b',
         'prompt' => $prompt,
         'stream' => false,
         'options' => [
@@ -1082,6 +1086,45 @@ function getLinksAnalysis($context) {
     }
 
     return "Link condivisi oggi:\n" . implode("\n", $analysis);
+}
+
+/**
+ * Pre-analizza tutti i link e restituisce una mappa URL -> riassunto
+ * Ogni link viene analizzato separatamente per evitare timeout
+ */
+function preAnalyzeLinks($context, $logFile) {
+    $urls = extractUrlsWithReactions($context);
+
+    if (empty($urls)) {
+        file_put_contents($logFile, "No links found in context\n", FILE_APPEND);
+        return [];
+    }
+
+    file_put_contents($logFile, "Found " . count($urls) . " links to analyze\n", FILE_APPEND);
+
+    $linkMap = [];
+
+    foreach ($urls as $urlData) {
+        $url = $urlData['url'];
+        file_put_contents($logFile, "Fetching: $url\n", FILE_APPEND);
+
+        $content = fetchUrlContent($url);
+
+        if ($content && (!empty($content['title']) || !empty($content['description']))) {
+            file_put_contents($logFile, "Summarizing: {$content['title']}\n", FILE_APPEND);
+            $summary = summarizeUrl($url, $content['title'], $content['description']);
+
+            if (!empty(trim($summary))) {
+                $linkMap[$url] = trim($summary);
+                file_put_contents($logFile, "Link summary OK: " . strlen($summary) . " chars\n", FILE_APPEND);
+            }
+        } else {
+            file_put_contents($logFile, "No content for: $url\n", FILE_APPEND);
+        }
+    }
+
+    file_put_contents($logFile, "Links analyzed: " . count($linkMap) . "/" . count($urls) . "\n", FILE_APPEND);
+    return $linkMap;
 }
 
 function _suggerisci_comando($comandoErrato, $chatId = null) {
