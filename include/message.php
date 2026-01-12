@@ -234,7 +234,7 @@ function processMessage($message) {
         
     } elseif (preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/\brootbot\b/i', $text) || preg_match('/\brotbotbot\b/i', $text) || $isReplyToBot || ($chatType == 'private' && !empty($text) && !preg_match('/^\//', $text))) {
         // In chat privata risponde sempre (tranne comandi), in gruppo solo se menzionato
-        $response = _ai($chatID, $chatType, $text);
+        $response = _ai($chatID, $chatType, $text, $firstName);
 
     } elseif (preg_match('/^\/saluto(?:@rootbotbot)?(?:\s+-(\d+))?$/', $text, $salutoMatches)) {
         // Comando sperimentale - output in chat privata

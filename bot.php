@@ -58,6 +58,7 @@ if (isset($update['message'])) {
 
     // PRIMA: Gestisci immagini - analizza e salva nel contesto PRIMA di processMessage
     // Così l'AI avrà il contesto dell'immagine quando risponde
+    $botImageAnalysis = null; // Analisi del bot da salvare separatamente
     if (isset($message['photo'])) {
         $photos = $message['photo'];
         $fileId = $photos[count($photos) - 1]['file_id']; // Prendi la versione più grande
@@ -66,8 +67,16 @@ if (isset($update['message'])) {
         // Analizza l'immagine con AI vision (passa anche la caption per contesto)
         $imageDescription = analyzeImage($fileId, $caption);
 
+        // Messaggio utente: ha condiviso un'immagine (+ eventuale caption)
+        if ($caption) {
+            $messageText = "[ha condiviso un'immagine] $caption";
+        } else {
+            $messageText = "[ha condiviso un'immagine]";
+        }
+
         if ($imageDescription) {
-            $messageText = "[immagine: $imageDescription]";
+            // Salva l'analisi come messaggio separato del bot
+            $botImageAnalysis = "[analisi immagine: $imageDescription]";
 
             // Controlla se la caption menziona il bot
             $captionMentionsBot = !empty($caption) && (
@@ -86,10 +95,6 @@ if (isset($update['message'])) {
                     'reply_to_message_id' => $message['message_id']
                 ]);
             }
-        } elseif ($caption) {
-            $messageText = "[immagine] $caption";
-        } else {
-            $messageText = "[immagine]";
         }
     }
 
@@ -107,8 +112,16 @@ if (isset($update['message'])) {
         $imageDescription = analyzeImage($fileId, $caption);
         file_put_contents('debug.log', "analyzeImage returned: " . ($imageDescription ? "OK (" . strlen($imageDescription) . " chars)" : "NULL") . "\n", FILE_APPEND);
 
+        // Messaggio utente: ha condiviso un'immagine (+ eventuale caption)
+        if ($caption) {
+            $messageText = "[ha condiviso un'immagine] $caption";
+        } else {
+            $messageText = "[ha condiviso un'immagine]";
+        }
+
         if ($imageDescription) {
-            $messageText = "[immagine: $imageDescription]";
+            // Salva l'analisi come messaggio separato del bot
+            $botImageAnalysis = "[analisi immagine: $imageDescription]";
 
             $captionMentionsBot = !empty($caption) && (
                 preg_match('/@root\b/', $caption) ||
@@ -125,16 +138,16 @@ if (isset($update['message'])) {
                     'reply_to_message_id' => $message['message_id']
                 ]);
             }
-        } elseif ($caption) {
-            $messageText = "[immagine] $caption";
-        } else {
-            $messageText = "[immagine]";
         }
     }
 
     // Salva nel contesto PRIMA di processMessage (così l'AI ha il contesto aggiornato)
     if (!empty(trim($messageText))) {
         saveMessageToContext($groupId, $userName, $messageText);
+    }
+    // Salva l'analisi immagine come messaggio separato del bot
+    if (!empty($botImageAnalysis)) {
+        saveMessageToContext($groupId, 'rootbot', $botImageAnalysis);
     }
 
     // POI: Processa il messaggio (comandi, AI, ecc.)

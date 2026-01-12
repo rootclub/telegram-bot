@@ -195,6 +195,65 @@ function getChatContext($groupId, $hours = 24, $limit = 200) {
     return $result;
 }
 
+/**
+ * Recupera contesto misto: messaggi gruppo + conversazione specifica user↔bot
+ * @param int $groupId ID del gruppo
+ * @param string $userName Nome dell'utente con cui il bot sta parlando
+ * @param int $groupLimit Numero di messaggi recenti del gruppo
+ * @param int $conversationLimit Numero di scambi user↔bot da includere
+ * @return array ['group' => string, 'conversation' => string]
+ */
+function getChatContextMixed($groupId, $userName, $groupLimit = 10, $conversationLimit = 10) {
+    global $db;
+
+    $hours_ago = time() - (24 * 3600); // ultime 24 ore
+
+    // Blocco 1: ultimi N messaggi del gruppo (tutti gli utenti)
+    $stmt = $db->prepare("
+        SELECT user_name, message_text, timestamp
+        FROM contesto_chat
+        WHERE group_id = :group_id
+        AND timestamp >= :hours_ago
+        ORDER BY timestamp DESC
+        LIMIT " . intval($groupLimit)
+    );
+    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
+    $stmt->bindValue(':hours_ago', $hours_ago, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+
+    $groupMessages = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $groupMessages[] = $row['user_name'] . ": " . $row['message_text'];
+    }
+    $groupContext = implode("\n", array_reverse($groupMessages));
+
+    // Blocco 2: conversazione specifica user↔bot (solo messaggi di $userName e rootbot)
+    $stmt = $db->prepare("
+        SELECT user_name, message_text, timestamp
+        FROM contesto_chat
+        WHERE group_id = :group_id
+        AND timestamp >= :hours_ago
+        AND (user_name = :user_name OR user_name = 'rootbot')
+        ORDER BY timestamp DESC
+        LIMIT " . intval($conversationLimit * 2) // *2 perché contiamo sia user che bot
+    );
+    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
+    $stmt->bindValue(':hours_ago', $hours_ago, SQLITE3_INTEGER);
+    $stmt->bindValue(':user_name', $userName, SQLITE3_TEXT);
+    $result = $stmt->execute();
+
+    $conversationMessages = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $conversationMessages[] = $row['user_name'] . ": " . $row['message_text'];
+    }
+    $conversationContext = implode("\n", array_reverse($conversationMessages));
+
+    return [
+        'group' => $groupContext,
+        'conversation' => $conversationContext
+    ];
+}
+
 function getChatContextForHour($groupId, $hoursAgo = 0, $limit = 100) {
     global $db;
 
@@ -304,7 +363,7 @@ function dumpChatContext($groupId) {
     error_log($debug_info);
 }
 
-function _ai($chatID, $chatType, $message) {
+function _ai($chatID, $chatType, $message, $userName = 'Utente') {
     $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
 
@@ -314,9 +373,11 @@ function _ai($chatID, $chatType, $message) {
         'action' => 'typing'
     ]);
 
-    $context = getChatContext($chatID, 1, 10);
-    
-    
+    // Recupera contesto misto: gruppo + conversazione specifica
+    $contexts = getChatContextMixed($chatID, $userName, 5, 5);
+    $groupContext = $contexts['group'];
+    $conversationContext = $contexts['conversation'];
+
     $formatter = new IntlDateFormatter('it_IT', IntlDateFormatter::FULL, IntlDateFormatter::NONE);
     $oggi = ucfirst($formatter->format(new DateTime()));
     $orario = date('H:i');
@@ -326,7 +387,7 @@ Sei rootbot, il bot del circolo /root (detto anche root o root club).
 
 Il tuo carattere:
 - Sei un osservatore curioso e benevolo dell'umanità, tutto ti sembra interessante e a volte buffo
-- Hai un pizzico dello spirito di Bender di Futurama: cinico, ironico, pungente quando serve, mai ingenuo
+- Hai un pizzico dello spirito di Bender di Futurama: cinico, ironico, pungente quando serve, mai ingenuo e hai anche un pizzico dello spirito di Sheldon di Big Bang Theory.
 - Sotto sotto questi umani ti stanno simpatici, anche se non li capisci sempre
 - Sei sarcastico ma mai sgarbato, ti piace punzecchiare con affetto
 - Dai risposte concise e taglienti, niente spiegoni
@@ -346,19 +407,36 @@ INSTR;
     $message = str_replace('@root', '', $message);
     $message = trim($message);
 
+    // Costruisci sezione conversazione solo se ci sono scambi precedenti
+    $conversationSection = '';
+    if (!empty($conversationContext)) {
+        $conversationSection = <<<CONV
+
+### CONVERSAZIONE CON {$userName} ###
+{$conversationContext}
+CONV;
+    }
+
     $prompt = <<<PROMPT
 ### ISTRUZIONI ###
 {$instructions}
-### CONTESTO CONVERSAZIONE (solo per riferimento) ###
-{$context}
 
-### DOMANDA A CUI DEVI RISPONDERE ###
+### CONTESTO GRUPPO (ultimi messaggi) ###
+{$groupContext}
+{$conversationSection}
+
+### MESSAGGIO DI {$userName} A CUI DEVI RISPONDERE ###
 {$message}
 
-Rispondi SOLO alla domanda sopra. Il contesto serve solo per capire di cosa si sta parlando, non divagare su altri argomenti menzionati nel contesto.
+Rispondi a {$userName}. Il contesto gruppo serve per capire di cosa si parla, la conversazione mostra i tuoi scambi precedenti con questo utente.
 PROMPT;
 
-	file_put_contents(dirname(__DIR__) . '/ai.log', print_r($prompt, true) . "\n\n", FILE_APPEND);
+    // Log strutturato
+    $logEntry = "\n" . str_repeat('=', 60) . "\n";
+    $logEntry .= "[" . date('Y-m-d H:i:s') . "] Utente: {$userName}\n";
+    $logEntry .= str_repeat('-', 60) . "\n";
+    $logEntry .= $prompt . "\n";
+    file_put_contents(dirname(__DIR__) . '/ai.log', $logEntry, FILE_APPEND);
 
     $requestData = [
         'model' => $model,
@@ -421,7 +499,13 @@ PROMPT;
         $response = mb_substr($response, 0, 4093) . '...';
     }
 
-	saveMessageToContext($chatID, "rootbot", $response);
+    // Log risposta
+    $logEntry = str_repeat('-', 60) . "\n";
+    $logEntry .= "RISPOSTA:\n{$response}\n";
+    $logEntry .= str_repeat('=', 60) . "\n";
+    file_put_contents(dirname(__DIR__) . '/ai.log', $logEntry, FILE_APPEND);
+
+    saveMessageToContext($chatID, "rootbot", $response);
     return $response;
 }
 
