@@ -16,6 +16,16 @@ define('OLLAMA_MODEL_LIGHT_GPU', false);  // CPU per modello leggero
 define('OLLAMA_MODEL_VISION','gemma3:12b');  // Modello multimodale per analisi immagini
 define('OLLAMA_MODEL_VISION_GPU', true);  // GPU per vision (serve velocità)
 
+// Modelli per sistema Quiz
+define('OLLAMA_QUIZ_SUBTOPICS', 'gemma3:4b');        // Genera lista subtopics (veloce)
+define('OLLAMA_QUIZ_SUBTOPICS_GPU', false);
+
+define('OLLAMA_QUIZ_GENERATOR', 'deepseek-r1:14b');  // Genera il quiz da Wikipedia
+define('OLLAMA_QUIZ_GENERATOR_GPU', false);
+
+define('OLLAMA_QUIZ_REVIEWER', 'gemma3:4b');         // Revisiona e valida il quiz
+define('OLLAMA_QUIZ_REVIEWER_GPU', false);
+
 define('SILENCE_DURATION', 120); // Durata del silenzio in secondi (2 minuti)
 define('RESPONSE_PROBABILITY', 0.8); // Probabilità di risposta (80%)
 

@@ -8,6 +8,7 @@ include "include/ai.php";
 include "include/moderation.php";
 include "include/orders.php";
 include "include/events.php";
+include "include/quiz.php";
 include "include/message.php";
 
 $db = new SQLite3(DB_FILE);
@@ -196,6 +197,9 @@ if (isset($update['message'])) {
     } elseif (strpos($data, 'annullo_ospite:') === 0) {
         handleAnnulloOspiteCallback($callbackQuery);
     }
+} elseif (isset($update['poll_answer'])) {
+    // Gestione risposte ai quiz
+    handlePollAnswer($update['poll_answer']);
 }
 
 ?>

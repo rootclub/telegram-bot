@@ -194,5 +194,86 @@ function initDatabase() {
         // Migra i dati esistenti
         $db->exec("UPDATE ordini SET ritirante_name = CAST(ritirante AS TEXT) WHERE ritirante_name IS NULL");
     }
+
+    // === TABELLE SISTEMA QUIZ ===
+
+    // Argomenti quiz disponibili (per /quiz senza argomento)
+    $db->exec("CREATE TABLE IF NOT EXISTS quiz_topics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic TEXT NOT NULL UNIQUE,
+        description TEXT,
+        created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    )");
+
+    // Storico quiz inviati
+    $db->exec("CREATE TABLE IF NOT EXISTS quiz_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        poll_id TEXT NOT NULL UNIQUE,
+        message_id INTEGER,
+        topic TEXT NOT NULL,
+        wikipedia_title TEXT,
+        question TEXT NOT NULL,
+        options TEXT,
+        correct_option INTEGER NOT NULL,
+        explanation TEXT,
+        created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    )");
+
+    // Migration: aggiungi colonna options se non esiste
+    $result = $db->query("PRAGMA table_info(quiz_history)");
+    $hasOptions = false;
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        if ($row['name'] == 'options') {
+            $hasOptions = true;
+            break;
+        }
+    }
+    if (!$hasOptions) {
+        $db->exec("ALTER TABLE quiz_history ADD COLUMN options TEXT");
+    }
+
+    // Risposte utenti per classifica
+    $db->exec("CREATE TABLE IF NOT EXISTS quiz_responses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        quiz_id INTEGER NOT NULL,
+        poll_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        user_name TEXT,
+        selected_option INTEGER NOT NULL,
+        is_correct INTEGER NOT NULL,
+        answered_at INTEGER DEFAULT (strftime('%s', 'now')),
+        FOREIGN KEY (quiz_id) REFERENCES quiz_history(id),
+        UNIQUE(poll_id, user_id)
+    )");
+
+    // Indici per performance quiz
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_history_poll_id ON quiz_history(poll_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_responses_poll_id ON quiz_responses(poll_id)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_responses_user_id ON quiz_responses(user_id)");
+
+    // Popola topic iniziali se tabella vuota
+    $result = $db->query("SELECT COUNT(*) as count FROM quiz_topics");
+    $row = $result->fetchArray(SQLITE3_ASSOC);
+    if ($row['count'] == 0) {
+        $defaultTopics = [
+            ['storia', 'Eventi storici, personaggi, date importanti'],
+            ['scienza', 'Fisica, chimica, biologia, astronomia'],
+            ['tecnologia', 'Informatica, elettronica, innovazioni'],
+            ['geografia', 'Paesi, citta, fiumi, montagne'],
+            ['cultura', 'Arte, letteratura, musica, cinema'],
+            ['natura', 'Animali, piante, ecosistemi'],
+            ['sport', 'Discipline sportive, olimpiadi, record'],
+            ['videogiochi', 'Arcade, console, storia dei videogiochi'],
+            ['anime', 'Anime classici e moderni, manga'],
+            ['elettronica', 'Circuiti, componenti, fondamenti']
+        ];
+        foreach ($defaultTopics as $t) {
+            $stmt = $db->prepare("INSERT OR IGNORE INTO quiz_topics (topic, description) VALUES (:topic, :desc)");
+            $stmt->bindValue(':topic', $t[0], SQLITE3_TEXT);
+            $stmt->bindValue(':desc', $t[1], SQLITE3_TEXT);
+            $stmt->execute();
+        }
+    }
 }
 ?>

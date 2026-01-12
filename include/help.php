@@ -39,7 +39,16 @@ Posso anche gestire eventi speciali (corsi, cene, talk):
 /annullo - elimini la tua partecipazione o ospite
 /annullo_ospite - rimuovi un ospite che hai aggiunto
 /modifica_evento - modifica descrizione, data/ora o costo di un evento (solo admin)
-/chiudi_evento - elimina un evento concluso (solo admin)";
+/chiudi_evento - elimina un evento concluso (solo admin)
+
+Quiz e trivia:
+/quiz - lancia un quiz su argomento casuale
+/quiz [argomento] - quiz su argomento specifico (es: /quiz storia)
+/argomenti_quiz - mostra argomenti predefiniti disponibili
+/classifica_quiz - classifica dei migliori giocatori
+/aggiungi_argomento [nome]|[descrizione] - aggiunge argomento con descrizione (solo admin)
+/aggiungi_argomento [arg1], [arg2], [arg3] - aggiunge piu argomenti (solo admin)
+Puoi anche chiedere: 'rootbot fai un quiz su tecnologia'";
 }
 
 function _info($chatID, $chatType){

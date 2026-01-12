@@ -231,7 +231,72 @@ function processMessage($message) {
 
     } elseif ($text == '/elimina_asporto') {
         $response = elimina_pappatoia($chatID, $fromId);
-        
+
+    // === COMANDI QUIZ ===
+    } elseif (preg_match('/^\/quiz(?:@rootbotbot)?(?:\s+(.*))?$/ui', $text, $quizMatches)) {
+        // /quiz o /quiz [argomento]
+        $quizError = handleQuizCommand($text, $chatID, $fromId, $firstName);
+        if ($quizError !== null) {
+            $response = $quizError;
+        }
+        // Se null, quiz inviato con successo, nessuna risposta testuale
+
+    } elseif ($text == '/argomenti_quiz' || $text == '/argomenti_quiz@rootbotbot') {
+        $response = listQuizTopics();
+
+    } elseif ($text == '/classifica_quiz' || $text == '/classifica_quiz@rootbotbot') {
+        $response = getQuizLeaderboard($chatID);
+
+    } elseif (preg_match('/^\/aggiungi_argomento(?:@rootbotbot)?\s+(.+)$/ui', $text, $topicMatches)) {
+        // Comando admin per aggiungere topic (supporta lista: arg1, arg2, arg3)
+        if (isQuizAdmin($chatID, $fromId)) {
+            $input = trim($topicMatches[1]);
+
+            // Se contiene virgola e non pipe, è una lista di argomenti
+            if (strpos($input, ',') !== false && strpos($input, '|') === false) {
+                $topics = array_map('trim', explode(',', $input));
+                $topics = array_filter($topics);
+                $added = [];
+                $failed = [];
+
+                foreach ($topics as $t) {
+                    if (addQuizTopic($t, null)) {
+                        $added[] = $t;
+                    } else {
+                        $failed[] = $t;
+                    }
+                }
+
+                $response = "";
+                if (!empty($added)) {
+                    $response .= "Aggiunti: " . implode(', ', $added);
+                }
+                if (!empty($failed)) {
+                    $response .= ($response ? "\n" : "") . "Gia esistenti: " . implode(', ', $failed);
+                }
+            } else {
+                // Singolo argomento: nome|descrizione
+                $parts = explode('|', $input, 2);
+                $newTopic = trim($parts[0]);
+                $desc = isset($parts[1]) ? trim($parts[1]) : null;
+
+                if (addQuizTopic($newTopic, $desc)) {
+                    $response = "Argomento '$newTopic' aggiunto con successo!";
+                } else {
+                    $response = "Argomento gia esistente o errore.";
+                }
+            }
+        } else {
+            $response = "Solo gli admin possono aggiungere argomenti quiz.";
+        }
+
+    // Pattern naturale quiz: "rootbot fai un quiz su X"
+    } elseif (($naturalQuizTopic = detectNaturalQuizRequest($text, $chatType == 'private')) !== null) {
+        $quizError = generateAndSendQuiz($chatID, $naturalQuizTopic, $fromId, $firstName);
+        if ($quizError !== null) {
+            $response = $quizError;
+        }
+
     } elseif (preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/\brootbot\b/i', $text) || preg_match('/\brotbotbot\b/i', $text) || $isReplyToBot || ($chatType == 'private' && !empty($text) && !preg_match('/^\//', $text))) {
         // In chat privata risponde sempre (tranne comandi), in gruppo solo se menzionato
         $response = _ai($chatID, $chatType, $text, $firstName);
