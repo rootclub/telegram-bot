@@ -252,6 +252,19 @@ function initDatabase() {
     $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_responses_poll_id ON quiz_responses(poll_id)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_responses_user_id ON quiz_responses(user_id)");
 
+    // Tabella per tracciare messaggi a cui il bot ha risposto (per gestire edited_message)
+    $db->exec("CREATE TABLE IF NOT EXISTS bot_replied (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        replied_at INTEGER NOT NULL,
+        UNIQUE(chat_id, message_id)
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_bot_replied_chat_msg ON bot_replied(chat_id, message_id)");
+    // Pulizia automatica: rimuovi record più vecchi di 24 ore
+    $oneDayAgo = time() - (24 * 3600);
+    $db->exec("DELETE FROM bot_replied WHERE replied_at < $oneDayAgo");
+
     // Popola topic iniziali se tabella vuota
     $result = $db->query("SELECT COUNT(*) as count FROM quiz_topics");
     $row = $result->fetchArray(SQLITE3_ASSOC);
@@ -275,5 +288,44 @@ function initDatabase() {
             $stmt->execute();
         }
     }
+}
+
+/**
+ * Verifica se il bot ha già risposto (o sta rispondendo) a un messaggio.
+ * @param int $chatId ID della chat
+ * @param int $messageId ID del messaggio
+ * @return bool true se già risposto, false altrimenti
+ */
+function hasAlreadyReplied($chatId, $messageId) {
+    global $db;
+
+    $stmt = $db->prepare("SELECT COUNT(*) as cnt FROM bot_replied
+                          WHERE chat_id = :chat_id AND message_id = :message_id");
+    $stmt->bindValue(':chat_id', $chatId, SQLITE3_INTEGER);
+    $stmt->bindValue(':message_id', $messageId, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+    $row = $result->fetchArray(SQLITE3_ASSOC);
+
+    return ($row['cnt'] > 0);
+}
+
+/**
+ * Marca un messaggio come "risposto" (o "in elaborazione").
+ * Usa INSERT OR IGNORE per evitare errori su duplicati.
+ * @param int $chatId ID della chat
+ * @param int $messageId ID del messaggio
+ * @return bool true se inserito, false se già esisteva
+ */
+function markAsReplied($chatId, $messageId) {
+    global $db;
+
+    $stmt = $db->prepare("INSERT OR IGNORE INTO bot_replied (chat_id, message_id, replied_at)
+                          VALUES (:chat_id, :message_id, :replied_at)");
+    $stmt->bindValue(':chat_id', $chatId, SQLITE3_INTEGER);
+    $stmt->bindValue(':message_id', $messageId, SQLITE3_INTEGER);
+    $stmt->bindValue(':replied_at', time(), SQLITE3_INTEGER);
+    $stmt->execute();
+
+    return ($db->changes() > 0);
 }
 ?>

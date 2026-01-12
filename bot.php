@@ -151,10 +151,54 @@ if (isset($update['message'])) {
         saveMessageToContext($groupId, 'rootbot', $botImageAnalysis);
     }
 
+    // Prima di processare, marca come "in elaborazione" se il messaggio invoca il bot
+    // (per evitare doppie risposte se il messaggio viene editato durante l'elaborazione)
+    $textToCheck = $message['text'] ?? $message['caption'] ?? '';
+    $mentionsBot = preg_match('/@root\b/', $textToCheck) ||
+                   preg_match('/@bot\b/', $textToCheck) ||
+                   preg_match('/@rootbot\b/', $textToCheck) ||
+                   preg_match('/\brootbot\b/i', $textToCheck) ||
+                   preg_match('/\brotbotbot\b/i', $textToCheck) ||
+                   $chatType == 'private';
+
+    if ($mentionsBot) {
+        markAsReplied($groupId, $message['message_id']);
+    }
+
     // POI: Processa il messaggio (comandi, AI, ecc.)
     processMessage($message);
 } elseif (isset($update['edited_message'])) {
-    // Ignora i messaggi editati per evitare risposte duplicate
+    // Gestisce i messaggi editati solo se menzionano il bot (o chat privata) e non abbiamo già risposto
+    $editedMessage = $update['edited_message'];
+    $chatId = $editedMessage['chat']['id'];
+    $messageId = $editedMessage['message_id'];
+    $chatType = $editedMessage['chat']['type'];
+    $text = $editedMessage['text'] ?? $editedMessage['caption'] ?? '';
+
+    // Controlla se il messaggio menziona il bot
+    $mentionsBot = preg_match('/@root\b/', $text) ||
+                   preg_match('/@bot\b/', $text) ||
+                   preg_match('/@rootbot\b/', $text) ||
+                   preg_match('/\brootbot\b/i', $text) ||
+                   preg_match('/\brotbotbot\b/i', $text);
+
+    // Processa solo se: (menziona il bot O è chat privata) E non abbiamo già risposto
+    if (($mentionsBot || $chatType == 'private') && !hasAlreadyReplied($chatId, $messageId)) {
+        // Marca subito come "in elaborazione" per evitare race condition
+        if (markAsReplied($chatId, $messageId)) {
+            // Salva nel contesto e processa come un messaggio normale
+            $userName = $editedMessage['from']['first_name'] ?? 'Utente';
+            $messageText = str_replace('@bot', '', $text);
+            $messageText = str_replace('@rootbot', '', $messageText);
+            $messageText = str_replace('@root', '', $messageText);
+
+            if (!empty(trim($messageText))) {
+                saveMessageToContext($chatId, $userName, $messageText);
+            }
+
+            processMessage($editedMessage);
+        }
+    }
 } elseif (isset($update['callback_query'])) {
     $callbackQuery = $update['callback_query'];
     $data = $callbackQuery['data'];
