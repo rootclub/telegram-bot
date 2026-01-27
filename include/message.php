@@ -368,12 +368,17 @@ function processMessage($message) {
 
     // Invia la risposta solo se è stata impostata
     if ($response !== null) {
-        $result = makeAPIRequest('sendMessage', [
+        // In chat privata non serve il reply, in gruppo sì per chiarezza
+        $messageParams = [
             'chat_id' => $chatID,
             'text' => $response,
-            'parse_mode' => 'HTML',
-            'reply_to_message_id' => $message['message_id']
-        ]);
+            'parse_mode' => 'HTML'
+        ];
+        if ($chatType !== 'private') {
+            $messageParams['reply_to_message_id'] = $message['message_id'];
+        }
+
+        $result = makeAPIRequest('sendMessage', $messageParams);
 
         // Se il reply fallisce (messaggio originale eliminato), riprova senza reply
         if (!$result || !$result['ok']) {

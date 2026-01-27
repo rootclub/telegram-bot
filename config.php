@@ -4,7 +4,7 @@ define('BOT_TOKEN', 'TELEGRAM_TOKEN');
 define('WEBHOOK_URL', 'https://www.yourdomain.it/telegram/bot.php');
 define('DB_FILE', 'telegram_bot.sqlite');
 define('IMAGE_SAVE_PATH', __DIR__ . '/images/');
-define('OLLAMA_URL','http://188.153.196.133:11434/api/generate');
+define('QBERT_URL', 'https://qbert.neocerebrum.work');  // Gateway QBert per Ollama e altri servizi
 
 // Modelli Ollama e configurazione GPU
 define('OLLAMA_MODEL','deepseek-r1:14b');

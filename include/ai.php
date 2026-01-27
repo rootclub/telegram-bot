@@ -3,6 +3,109 @@
 ////////////////////// GESTIONE CHAT CON AI ////////////////////
 ////////////////////////////////////////////////////////////////
 
+require_once __DIR__ . '/QBertClient.php';
+
+/**
+ * Istanza singleton di QBertClient
+ */
+function getQBertClient() {
+    static $qbert = null;
+    if ($qbert === null) {
+        $qbert = new QBertClient(QBERT_URL, timeout: 120.0, maxWait: 600.0);
+    }
+    return $qbert;
+}
+
+/**
+ * Chiama Ollama via QBert (chiamata bloccante semplice)
+ * Per chiamate non-streaming dove non serve feedback progressivo
+ *
+ * @param array $requestData Dati della richiesta (model, prompt, stream, options, images...)
+ * @param string $priority Priorità QBert (urgent/normal/lazy)
+ * @return array|null Risposta decodificata o null in caso di errore
+ */
+function callOllamaViaQBert($requestData, $priority = QBertClient::PRIORITY_NORMAL) {
+    $qbert = getQBertClient();
+
+    // Forza stream=false per QBert
+    $requestData['stream'] = false;
+
+    $result = $qbert->post('ollama', '/api/generate', $requestData, $priority);
+
+    if ($result['is_ticket']) {
+        // Job accodato, aspetta (polling bloccante)
+        $result = $qbert->waitForTicket($result['ticket_id']);
+    }
+
+    if (isset($result['json'])) {
+        return $result['json'];
+    }
+
+    return null;
+}
+
+/**
+ * Chiama Ollama via QBert con refresh del typing indicator
+ * Per chiamate dove l'utente aspetta e vogliamo mostrare "sta scrivendo..."
+ *
+ * @param array $requestData Dati della richiesta
+ * @param int $chatId Chat ID per typing indicator
+ * @param string $priority Priorità QBert
+ * @return array|null Risposta decodificata o null in caso di errore
+ */
+function callOllamaViaQBertWithTyping($requestData, $chatId, $priority = QBertClient::PRIORITY_NORMAL) {
+    $qbert = getQBertClient();
+
+    // Forza stream=false
+    $requestData['stream'] = false;
+
+    // Invia typing iniziale
+    makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
+    $lastTypingTime = time();
+
+    // Submit senza aspettare
+    $result = $qbert->submit('POST', 'ollama', '/api/generate', $requestData, $priority);
+
+    if (!$result['is_ticket']) {
+        // Risposta immediata
+        return $result['json'] ?? null;
+    }
+
+    // Polling manuale con typing refresh
+    $ticketId = $result['ticket_id'];
+    $start = microtime(true);
+    $maxWait = 600.0;
+    $pollInterval = 2.0;
+
+    while (true) {
+        if ((microtime(true) - $start) > $maxWait) {
+            return null; // Timeout
+        }
+
+        // Rinnova typing ogni 4 secondi
+        if ((time() - $lastTypingTime) >= 4) {
+            makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
+            $lastTypingTime = time();
+        }
+
+        $ticket = $qbert->poll($ticketId);
+
+        if (!$ticket['found']) {
+            return null;
+        }
+
+        if ($ticket['done']) {
+            return $ticket['json'] ?? null;
+        }
+
+        if ($ticket['failed']) {
+            return null;
+        }
+
+        usleep((int)($pollInterval * 1000000));
+    }
+}
+
 /**
  * Classifica se un messaggio richiede una ricerca Wikipedia
  * e in caso positivo estrae il termine di ricerca.
@@ -36,30 +139,20 @@ PROMPT;
         $requestData['options'] = ['num_gpu' => 0];
     }
 
-    $ch = curl_init(OLLAMA_URL);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($requestData));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-
     $startTime = microtime(true);
-    $response = curl_exec($ch);
+    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
     $elapsed = round((microtime(true) - $startTime) * 1000);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
 
     // Log
     $logEntry = "[" . date('Y-m-d H:i:s') . "] classify ({$elapsed}ms)\n";
     $logEntry .= "MSG: " . substr($message, 0, 100) . "\n";
 
-    if ($httpCode !== 200 || !$response) {
-        $logEntry .= "ERROR: HTTP $httpCode\n";
+    if (!$result) {
+        $logEntry .= "ERROR: QBert call failed\n";
         file_put_contents($logFile, $logEntry, FILE_APPEND);
         return ['needs_wiki' => false, 'search_term' => null];
     }
 
-    $result = json_decode($response, true);
     $llmResponse = $result['response'] ?? '';
 
     // Rimuovi tag <think> se presenti
@@ -215,9 +308,9 @@ function analyzeImage($fileId, $caption = '') {
     }
     file_put_contents($logFile, "Prompt: " . substr($prompt, 0, 100) . "\n", FILE_APPEND);
 
-    file_put_contents($logFile, "Calling Ollama model=" . OLLAMA_MODEL_VISION . ", GPU=" . (OLLAMA_MODEL_VISION_GPU ? 'YES' : 'NO') . "\n", FILE_APPEND);
+    file_put_contents($logFile, "Calling Ollama via QBert model=" . OLLAMA_MODEL_VISION . ", GPU=" . (OLLAMA_MODEL_VISION_GPU ? 'YES' : 'NO') . "\n", FILE_APPEND);
 
-    // Chiama Ollama con modello vision
+    // Chiama Ollama con modello vision via QBert
     $requestData = [
         'model' => OLLAMA_MODEL_VISION,
         'prompt' => $prompt,
@@ -227,26 +320,15 @@ function analyzeImage($fileId, $caption = '') {
     if (!OLLAMA_MODEL_VISION_GPU) {
         $requestData['options'] = ['num_gpu' => 0];
     }
-    $data = json_encode($requestData);
 
-    $ch = curl_init(OLLAMA_URL);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
 
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($httpCode !== 200 || !$response) {
-        file_put_contents($logFile, "FAIL: Ollama HTTP $httpCode\n", FILE_APPEND);
+    if (!$result) {
+        file_put_contents($logFile, "FAIL: QBert call failed\n", FILE_APPEND);
         return null;
     }
-    file_put_contents($logFile, "Ollama HTTP 200 OK\n", FILE_APPEND);
+    file_put_contents($logFile, "QBert call OK\n", FILE_APPEND);
 
-    $result = json_decode($response, true);
     $description = $result['response'] ?? null;
 
     file_put_contents($logFile, "Ollama response length=" . strlen($description ?? '') . "\n", FILE_APPEND);
@@ -511,7 +593,6 @@ function dumpChatContext($groupId) {
 }
 
 function _ai($chatID, $chatType, $message, $userName = 'Utente') {
-    $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
 
     // Mostra "sta scrivendo..." mentre l'LLM elabora
@@ -599,6 +680,7 @@ CONV;
 {$message}
 
 Rispondi a {$userName}. Il contesto gruppo serve per capire di cosa si parla, la conversazione mostra i tuoi scambi precedenti con questo utente.
+IMPORTANTE: Scrivi SOLO la tua risposta, senza prefissi come "rootbot:" o simili.
 PROMPT;
 
     // Log strutturato
@@ -611,58 +693,24 @@ PROMPT;
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true
+        'stream' => false
     ];
     if (!OLLAMA_MODEL_GPU) {
         $requestData['options'] = ['num_gpu' => 0];
     }
-    $data = json_encode($requestData);
 
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+    // Chiama Ollama via QBert con typing refresh
+    $result = callOllamaViaQBertWithTyping($requestData, $chatID, QBertClient::PRIORITY_NORMAL);
 
-    $response = '';
-    $lastTypingTime = time();
-
-    // Callback per raccogliere la risposta
-    $writeCallback = function($ch, $data) use (&$response) {
-        $complete_line = json_decode($data, true);
-        if ($complete_line && isset($complete_line['response'])) {
-            $response .= $complete_line['response'];
-        }
-        return strlen($data);
-    };
-
-    // Progress callback per rinnovare typing periodicamente
-    $progressCallback = function($downloadSize, $downloaded, $uploadSize, $uploaded) use (&$lastTypingTime, $chatID) {
-        if ((time() - $lastTypingTime) >= 4) {
-            makeAPIRequest('sendChatAction', [
-                'chat_id' => $chatID,
-                'action' => 'typing'
-            ]);
-            $lastTypingTime = time();
-        }
-        return 0;
-    };
-
-    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $writeCallback);
-    curl_setopt($ch, CURLOPT_NOPROGRESS, false);
-    curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, $progressCallback);
-    curl_exec($ch);
-
-    if (curl_errno($ch)) {
-        curl_close($ch);
+    if (!$result) {
         // Cancella messaggio di stato Wikipedia se presente
         if ($wikiStatusMessageId) {
             makeAPIRequest('deleteMessage', ['chat_id' => $chatID, 'message_id' => $wikiStatusMessageId]);
         }
-        return "Si è verificato un errore durante la comunicazione con l'AI: " . curl_error($ch);
+        return "Si è verificato un errore durante la comunicazione con l'AI.";
     }
-    curl_close($ch);
+
+    $response = $result['response'] ?? '';
 
     // Rimuovi i tag <think>...</think> di DeepSeek-R1
     $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
@@ -689,88 +737,39 @@ PROMPT;
 }
 
 /**
- * Helper function per chiamate Ollama con diagnostica completa
- * @param int $timeout Timeout in secondi (default 120 per blocchi, usare 300 per final)
+ * Helper function per chiamate Ollama con diagnostica completa (via QBert)
+ * @param int $timeout Timeout in secondi (non più usato direttamente, gestito da QBert)
  */
 function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout = 120) {
-    $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
 
-    file_put_contents($logFile, "--- Ollama call: $label (timeout: {$timeout}s) ---\n", FILE_APPEND);
+    file_put_contents($logFile, "--- Ollama call via QBert: $label ---\n", FILE_APPEND);
 
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true
+        'stream' => false
     ];
     if (!OLLAMA_MODEL_GPU) {
         $requestData['options'] = ['num_gpu' => 0];
     }
-    $data = json_encode($requestData);
 
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
-
-    $response = '';
-    $rawBuffer = '';
-    $chunkCount = 0;
-    $jsonOkCount = 0;
-    $jsonFailCount = 0;
-
-    $callback = function($ch, $data) use (&$response, &$rawBuffer, &$chunkCount, &$jsonOkCount, &$jsonFailCount, $logFile, $label) {
-        $chunkCount++;
-        $rawBuffer .= $data;
-
-        if (strlen($rawBuffer) > 2048) {
-            $rawBuffer = substr($rawBuffer, -2048);
-        }
-
-        $complete_line = json_decode($data, true);
-        if ($complete_line && isset($complete_line['response'])) {
-            $response .= $complete_line['response'];
-            $jsonOkCount++;
-        } else if (strlen(trim($data)) > 0) {
-            $jsonFailCount++;
-            if ($jsonFailCount <= 3) {
-                $preview = substr(trim($data), 0, 200);
-                file_put_contents($logFile, "[$label] Chunk #{$chunkCount} non-JSON: {$preview}\n", FILE_APPEND);
-            }
-        }
-        return strlen($data);
-    };
-
-    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $callback);
     $startTime = time();
-    curl_exec($ch);
+    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_LAZY);
     $elapsed = time() - $startTime;
 
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_errno($ch);
-    $curlErrorMsg = curl_error($ch);
-
-    file_put_contents($logFile, "[$label] HTTP: $httpCode, chunks: $chunkCount, JSON ok: $jsonOkCount, fail: $jsonFailCount, time: {$elapsed}s\n", FILE_APPEND);
-
-    if (empty($response) && !empty($rawBuffer)) {
-        file_put_contents($logFile, "[$label] Raw buffer: " . substr($rawBuffer, 0, 300) . "\n", FILE_APPEND);
-    }
-
-    if ($curlError) {
-        file_put_contents($logFile, "[$label] CURL ERROR: $curlErrorMsg\n", FILE_APPEND);
-        curl_close($ch);
+    if (!$result) {
+        file_put_contents($logFile, "[$label] QBert call FAILED, time: {$elapsed}s\n", FILE_APPEND);
         return null;
     }
 
-    curl_close($ch);
+    $response = $result['response'] ?? '';
 
     // Rimuovi tag <think> di DeepSeek-R1
     $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
     $response = trim($response);
 
-    file_put_contents($logFile, "[$label] Response length: " . strlen($response) . "\n", FILE_APPEND);
+    file_put_contents($logFile, "[$label] QBert OK, time: {$elapsed}s, response length: " . strlen($response) . "\n", FILE_APPEND);
 
     return $response;
 }
@@ -942,7 +941,6 @@ PROMPT;
 }
 
 function _dj($chatID, $hoursAgo = 0) {
-    $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
 
     // Log dettagliato per debug
@@ -1107,36 +1105,20 @@ PROMPT;
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true
+        'stream' => false
     ];
     if (!OLLAMA_MODEL_GPU) {
         $requestData['options'] = ['num_gpu' => 0];
     }
-    $data = json_encode($requestData);
 
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 300); // 5 minuti max
+    // Chiama Ollama via QBert (DJ è un job in background, priorità lazy)
+    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_LAZY);
 
-    $response = '';
-    $callback = function($ch, $data) use (&$response) {
-        $complete_line = json_decode($data, true);
-        if ($complete_line && isset($complete_line['response'])) {
-            $response .= $complete_line['response'];
-        }
-        return strlen($data);
-    };
-
-    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $callback);
-    curl_exec($ch);
-
-    if (curl_errno($ch)) {
-        return "Errore AI: " . curl_error($ch);
+    if (!$result) {
+        return "Errore AI: QBert call failed";
     }
-    curl_close($ch);
+
+    $response = $result['response'] ?? '';
 
     // Rimuovi i tag <think>...</think> di DeepSeek-R1
     $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
@@ -1416,8 +1398,6 @@ function fetchUrlContent($url) {
 }
 
 function summarizeUrl($url, $title, $description) {
-    $ollamaUrl = OLLAMA_URL;
-
     $prompt = "Riassumi in 1-2 frasi brevi di cosa parla questa pagina web.\nTitolo: {$title}\nDescrizione: {$description}\nURL: {$url}\n\nRiassunto:";
 
     $requestData = [
@@ -1428,20 +1408,19 @@ function summarizeUrl($url, $title, $description) {
     if (!OLLAMA_MODEL_LIGHT_GPU) {
         $requestData['options'] = ['num_gpu' => 0];
     }
-    $data = json_encode($requestData);
 
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
 
-    $response = curl_exec($ch);
-    curl_close($ch);
+    if (!$result) {
+        return '';
+    }
 
-    $result = json_decode($response, true);
-    return $result['response'] ?? '';
+    $response = $result['response'] ?? '';
+
+    // Rimuovi tag <think> se presenti
+    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+
+    return trim($response);
 }
 
 function getLinksAnalysis($context) {
@@ -1511,16 +1490,7 @@ function preAnalyzeLinks($context, $logFile) {
 }
 
 function _suggerisci_comando($comandoErrato, $chatId = null) {
-    $ollamaUrl = OLLAMA_URL;
     $model = OLLAMA_MODEL;
-
-    // Mostra "sta scrivendo..." mentre l'LLM elabora
-    if ($chatId) {
-        makeAPIRequest('sendChatAction', [
-            'chat_id' => $chatId,
-            'action' => 'typing'
-        ]);
-    }
 
     // Ottieni l'help del bot
     $helpText = _help();
@@ -1549,55 +1519,24 @@ PROMPT;
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true
+        'stream' => false
     ];
     if (!OLLAMA_MODEL_GPU) {
         $requestData['options'] = ['num_gpu' => 0];
     }
-    $data = json_encode($requestData);
 
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+    // Chiama Ollama via QBert con typing refresh se abbiamo chatId
+    if ($chatId) {
+        $result = callOllamaViaQBertWithTyping($requestData, $chatId, QBertClient::PRIORITY_NORMAL);
+    } else {
+        $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+    }
 
-    $response = '';
-    $lastTypingTime = time();
-
-    // Callback per raccogliere la risposta
-    $writeCallback = function($ch, $data) use (&$response) {
-        $complete_line = json_decode($data, true);
-        if ($complete_line && isset($complete_line['response'])) {
-            $response .= $complete_line['response'];
-        }
-        return strlen($data);
-    };
-
-    // Progress callback per rinnovare typing periodicamente
-    $progressCallback = function($downloadSize, $downloaded, $uploadSize, $uploaded) use (&$lastTypingTime, $chatId) {
-        if ($chatId && (time() - $lastTypingTime) >= 4) {
-            makeAPIRequest('sendChatAction', [
-                'chat_id' => $chatId,
-                'action' => 'typing'
-            ]);
-            $lastTypingTime = time();
-        }
-        return 0; // 0 = continua, non-zero = abort
-    };
-
-    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $writeCallback);
-    curl_setopt($ch, CURLOPT_NOPROGRESS, false);
-    curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, $progressCallback);
-    curl_exec($ch);
-
-    if (curl_errno($ch)) {
-        curl_close($ch);
-        // Fallback al messaggio standard in caso di errore
+    if (!$result) {
         return "Il comando che hai inserito non lo conosco, controlla meglio cosa hai digitato. Usa /help per vedere i comandi disponibili.";
     }
-    curl_close($ch);
+
+    $response = $result['response'] ?? '';
 
     // Rimuovi i tag <think>...</think> di DeepSeek-R1
     $response = preg_replace('/<think>.*?<\/think>/s', '', $response);

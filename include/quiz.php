@@ -4,27 +4,27 @@
  * Genera quiz da Wikipedia usando doppio LLM (generatore + revisore)
  */
 
+require_once __DIR__ . '/QBertClient.php';
+
 /**
- * Chiama Ollama con un modello specifico
+ * Chiama Ollama con un modello specifico via QBert
  * @param string $prompt Il prompt da inviare
  * @param string $model Il modello da usare
  * @param bool $useGpu Se usare GPU o CPU
  * @param string $logFile File di log
  * @param string $label Etichetta per il log
- * @param int $timeout Timeout in secondi
+ * @param int $timeout Timeout in secondi (non più usato direttamente)
  * @return string|null Risposta o null se errore
  */
 function callOllamaQuiz($prompt, $model, $useGpu, $logFile, $label = 'quiz', $timeout = 90) {
-    $ollamaUrl = OLLAMA_URL;
-
     $gpuLabel = $useGpu ? 'GPU' : 'CPU';
-    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- $label (model: $model, $gpuLabel, timeout: {$timeout}s) ---\n", FILE_APPEND);
+    file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- $label (model: $model, $gpuLabel) ---\n", FILE_APPEND);
     file_put_contents($logFile, "PROMPT:\n$prompt\n", FILE_APPEND);
 
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => true
+        'stream' => false
     ];
 
     // Imposta GPU o CPU
@@ -32,39 +32,18 @@ function callOllamaQuiz($prompt, $model, $useGpu, $logFile, $label = 'quiz', $ti
         $requestData['options'] = ['num_gpu' => 0];
     }
 
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($requestData));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
-
-    $response = '';
-    $callback = function($ch, $data) use (&$response) {
-        $complete_line = json_decode($data, true);
-        if ($complete_line && isset($complete_line['response'])) {
-            $response .= $complete_line['response'];
-        }
-        return strlen($data);
-    };
-
-    curl_setopt($ch, CURLOPT_WRITEFUNCTION, $callback);
     $startTime = time();
-    curl_exec($ch);
+    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_LAZY);
     $elapsed = time() - $startTime;
 
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_errno($ch);
+    file_put_contents($logFile, "[$label] QBert call, time: {$elapsed}s\n", FILE_APPEND);
 
-    file_put_contents($logFile, "[$label] HTTP: $httpCode, time: {$elapsed}s\n", FILE_APPEND);
-
-    if ($curlError) {
-        file_put_contents($logFile, "[$label] CURL ERROR: " . curl_error($ch) . "\n", FILE_APPEND);
-        curl_close($ch);
+    if (!$result) {
+        file_put_contents($logFile, "[$label] QBert ERROR\n", FILE_APPEND);
         return null;
     }
 
-    curl_close($ch);
+    $response = $result['response'] ?? '';
 
     // Rimuovi tag <think> di DeepSeek-R1
     $response = preg_replace('/<think>.*?<\/think>/s', '', $response);

@@ -3,6 +3,8 @@
 ///////////////// MODERAZIONE IMPRECAZIONI ////////////////
 ///////////////////////////////////////////////////////////
 
+require_once __DIR__ . '/QBertClient.php';
+
 // Lista di parolacce e loro categorie (utilizzando placeholder per termini più espliciti)
 $profanity_list = [
     'lieve' => [
@@ -249,9 +251,6 @@ function is_porto_al_root($text) {
  * @return bool true se è hardware, false altrimenti
  */
 function isHardwareOffer($text) {
-    $ollamaUrl = OLLAMA_URL;
-    $model = OLLAMA_MODEL_LIGHT;
-
     $prompt = <<<PROMPT
 Analizza questo messaggio e rispondi SOLO con "SI" o "NO".
 
@@ -275,33 +274,23 @@ Messaggio: "{$text}"
 Risposta (solo SI o NO):
 PROMPT;
 
-    $data = json_encode([
-        'model' => $model,
+    $requestData = [
+        'model' => OLLAMA_MODEL_LIGHT,
         'prompt' => $prompt,
         'stream' => false,
         'options' => [
             'num_gpu' => 0,
             'temperature' => 0.1
         ]
-    ]);
+    ];
 
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
 
-    $response = curl_exec($ch);
-
-    if (curl_errno($ch)) {
-        error_log("isHardwareOffer CURL error: " . curl_error($ch));
-        curl_close($ch);
+    if (!$result) {
+        error_log("isHardwareOffer QBert error");
         return false;
     }
-    curl_close($ch);
 
-    $result = json_decode($response, true);
     $answer = strtoupper(trim($result['response'] ?? ''));
 
     // Rimuovi tag <think> se presenti
@@ -317,9 +306,6 @@ PROMPT;
  * Genera un messaggio contestuale con il modello principale.
  */
 function generateHardwareWarning($userName, $text) {
-    $ollamaUrl = OLLAMA_URL;
-    $model = OLLAMA_MODEL;
-
     $prompt = <<<PROMPT
 Sei rootbot, il bot del circolo /root. Hai un carattere cinico e ironico come Bender di Futurama, ma sotto sotto ti stanno simpatici questi umani.
 
@@ -339,34 +325,24 @@ Scrivi un messaggio che:
 Rispondi SOLO con il messaggio, senza preamboli:
 PROMPT;
 
-    $data = json_encode([
-        'model' => $model,
+    $requestData = [
+        'model' => OLLAMA_MODEL,
         'prompt' => $prompt,
         'stream' => false,
         'options' => [
             'num_gpu' => 0,
             'temperature' => 0.8
         ]
-    ]);
+    ];
 
-    $ch = curl_init($ollamaUrl);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
 
-    $response = curl_exec($ch);
-
-    if (curl_errno($ch)) {
-        error_log("generateHardwareWarning CURL error: " . curl_error($ch));
-        curl_close($ch);
+    if (!$result) {
+        error_log("generateHardwareWarning QBert error");
         // Fallback a messaggio standard
         return "Ehi $userName, apprezzo il pensiero, ma il /root è già pieno di rottami che qualcuno prima o poi dovrà portare in discarica. Se non c'è uno scopo specifico, meglio evitare di accumulare altra roba!";
     }
-    curl_close($ch);
 
-    $result = json_decode($response, true);
     $answer = trim($result['response'] ?? '');
 
     // Rimuovi tag <think> se presenti
