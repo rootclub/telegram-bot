@@ -4,6 +4,153 @@
 ////////////////////////////////////////////////////////////////
 
 /**
+ * Classifica se un messaggio richiede una ricerca Wikipedia
+ * e in caso positivo estrae il termine di ricerca.
+ * Usa OLLAMA_MODEL_LIGHT per velocità.
+ *
+ * @param string $message Il messaggio dell'utente
+ * @return array ['needs_wiki' => bool, 'search_term' => string|null]
+ */
+function classifyForWikipedia($message) {
+    $logFile = dirname(__DIR__) . '/wiki_search.log';
+
+    // Prompt compatto per classificazione + estrazione
+    $prompt = <<<PROMPT
+Analizza questo messaggio e rispondi SOLO con JSON.
+
+Se l'utente chiede informazioni fattuali/enciclopediche (chi è, cos'è, quando, dove, storia di, significato di, definizione, spiegami...), rispondi:
+{"wiki": true, "term": "termine da cercare su Wikipedia"}
+
+Se è conversazione, opinione, saluto, domanda personale o non richiede Wikipedia:
+{"wiki": false}
+
+Messaggio: "{$message}"
+PROMPT;
+
+    $requestData = [
+        'model' => OLLAMA_MODEL_LIGHT,
+        'prompt' => $prompt,
+        'stream' => false
+    ];
+    if (!OLLAMA_MODEL_LIGHT_GPU) {
+        $requestData['options'] = ['num_gpu' => 0];
+    }
+
+    $ch = curl_init(OLLAMA_URL);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($requestData));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+    $startTime = microtime(true);
+    $response = curl_exec($ch);
+    $elapsed = round((microtime(true) - $startTime) * 1000);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    // Log
+    $logEntry = "[" . date('Y-m-d H:i:s') . "] classify ({$elapsed}ms)\n";
+    $logEntry .= "MSG: " . substr($message, 0, 100) . "\n";
+
+    if ($httpCode !== 200 || !$response) {
+        $logEntry .= "ERROR: HTTP $httpCode\n";
+        file_put_contents($logFile, $logEntry, FILE_APPEND);
+        return ['needs_wiki' => false, 'search_term' => null];
+    }
+
+    $result = json_decode($response, true);
+    $llmResponse = $result['response'] ?? '';
+
+    // Rimuovi tag <think> se presenti
+    $llmResponse = preg_replace('/<think>.*?<\/think>/s', '', $llmResponse);
+    $llmResponse = trim($llmResponse);
+
+    $logEntry .= "LLM: $llmResponse\n";
+
+    // Estrai JSON dalla risposta
+    if (preg_match('/\{.*\}/s', $llmResponse, $matches)) {
+        $parsed = json_decode($matches[0], true);
+        if ($parsed && isset($parsed['wiki'])) {
+            $needsWiki = (bool)$parsed['wiki'];
+            $searchTerm = $parsed['term'] ?? null;
+
+            $logEntry .= "RESULT: wiki=" . ($needsWiki ? 'YES' : 'NO');
+            if ($searchTerm) $logEntry .= ", term='$searchTerm'";
+            $logEntry .= "\n";
+            file_put_contents($logFile, $logEntry . "\n", FILE_APPEND);
+
+            return ['needs_wiki' => $needsWiki, 'search_term' => $searchTerm];
+        }
+    }
+
+    $logEntry .= "RESULT: parse failed, default NO\n";
+    file_put_contents($logFile, $logEntry . "\n", FILE_APPEND);
+    return ['needs_wiki' => false, 'search_term' => null];
+}
+
+/**
+ * Cerca informazioni su Wikipedia per arricchire la risposta AI
+ * Preferisce Wikipedia italiana, fallback su inglese
+ *
+ * @param string $searchTerm Termine da cercare
+ * @return string|null Contenuto Wikipedia formattato o null
+ */
+function getWikipediaContext($searchTerm) {
+    $logFile = dirname(__DIR__) . '/wiki_search.log';
+
+    // Cerca prima su Wikipedia italiana (il bot è italiano)
+    $resultIt = fetchWikipediaContentByLang($searchTerm, 'it');
+    $resultEn = null;
+
+    // Usa italiano se ha contenuto sufficiente e non è disambiguazione
+    if ($resultIt && strlen($resultIt['extract']) >= 300 && !isDisambiguationPage($resultIt['extract'])) {
+        $result = $resultIt;
+        file_put_contents($logFile, "WIKI: uso italiano '$searchTerm'\n", FILE_APPEND);
+    } else {
+        // Fallback su inglese
+        $resultEn = fetchWikipediaContentByLang($searchTerm, 'en');
+
+        if ($resultEn && !isDisambiguationPage($resultEn['extract'])) {
+            // Se italiano esiste ma è corto, preferisci comunque italiano se inglese non è molto meglio
+            if ($resultIt && !isDisambiguationPage($resultIt['extract']) &&
+                strlen($resultIt['extract']) >= 200 &&
+                strlen($resultEn['extract']) < strlen($resultIt['extract']) * 3) {
+                $result = $resultIt;
+                file_put_contents($logFile, "WIKI: preferisco italiano (EN non molto meglio)\n", FILE_APPEND);
+            } else {
+                $result = $resultEn;
+                file_put_contents($logFile, "WIKI: uso inglese per '$searchTerm'\n", FILE_APPEND);
+            }
+        } elseif ($resultIt && !isDisambiguationPage($resultIt['extract'])) {
+            $result = $resultIt;
+            file_put_contents($logFile, "WIKI: uso italiano (EN non disponibile/disambigua)\n", FILE_APPEND);
+        } else {
+            file_put_contents($logFile, "WIKI: nessun risultato valido per '$searchTerm'\n\n", FILE_APPEND);
+            return null;
+        }
+    }
+
+    if (!$result || empty($result['extract'])) {
+        file_put_contents($logFile, "WIKI: nessun risultato per '$searchTerm'\n\n", FILE_APPEND);
+        return null;
+    }
+
+    $title = $result['title'];
+    $extract = $result['extract'];
+    $lang = $result['lang'] ?? '?';
+
+    // Tronca se troppo lungo (max 2000 caratteri per non appesantire il prompt)
+    if (strlen($extract) > 2000) {
+        $extract = substr($extract, 0, 2000) . '...';
+    }
+
+    file_put_contents($logFile, "WIKI: trovato '$title' [$lang] (" . strlen($extract) . " chars)\n\n", FILE_APPEND);
+
+    return "### INFORMAZIONI DA WIKIPEDIA: {$title} ###\n{$extract}";
+}
+
+/**
  * Analizza un'immagine con Ollama multimodale
  * @param string $fileId ID del file Telegram
  * @param string $caption Eventuale didascalia allegata all'immagine
@@ -407,6 +554,29 @@ INSTR;
     $message = str_replace('@root', '', $message);
     $message = trim($message);
 
+    // Classifica se serve ricerca Wikipedia
+    $wikiSection = '';
+    $wikiStatusMessageId = null;
+    $wikiClassification = classifyForWikipedia($message);
+    if ($wikiClassification['needs_wiki'] && !empty($wikiClassification['search_term'])) {
+        // Invia messaggio di stato
+        $searchTerm = $wikiClassification['search_term'];
+        $statusResult = makeAPIRequest('sendMessage', [
+            'chat_id' => $chatID,
+            'text' => "Sto cercando informazioni su {$searchTerm}..."
+        ]);
+        if ($statusResult && $statusResult['ok']) {
+            $wikiStatusMessageId = $statusResult['result']['message_id'];
+        }
+
+        $wikiContext = getWikipediaContext($searchTerm);
+        if ($wikiContext) {
+            $wikiSection = "\n\n{$wikiContext}\n\nUSA QUESTE INFORMAZIONI per rispondere in modo accurato, ma mantieni il tuo stile e non citare Wikipedia esplicitamente.";
+        } else {
+            $wikiSection = "\n\n### NOTA ###\nHo cercato informazioni su \"{$searchTerm}\" ma non ho trovato nulla di rilevante. Rispondi onestamente che non hai informazioni su questo argomento.";
+        }
+    }
+
     // Costruisci sezione conversazione solo se ci sono scambi precedenti
     $conversationSection = '';
     if (!empty($conversationContext)) {
@@ -423,7 +593,7 @@ CONV;
 
 ### CONTESTO GRUPPO (ultimi messaggi) ###
 {$groupContext}
-{$conversationSection}
+{$conversationSection}{$wikiSection}
 
 ### MESSAGGIO DI {$userName} A CUI DEVI RISPONDERE ###
 {$message}
@@ -486,6 +656,10 @@ PROMPT;
 
     if (curl_errno($ch)) {
         curl_close($ch);
+        // Cancella messaggio di stato Wikipedia se presente
+        if ($wikiStatusMessageId) {
+            makeAPIRequest('deleteMessage', ['chat_id' => $chatID, 'message_id' => $wikiStatusMessageId]);
+        }
         return "Si è verificato un errore durante la comunicazione con l'AI: " . curl_error($ch);
     }
     curl_close($ch);
@@ -504,6 +678,11 @@ PROMPT;
     $logEntry .= "RISPOSTA:\n{$response}\n";
     $logEntry .= str_repeat('=', 60) . "\n";
     file_put_contents(dirname(__DIR__) . '/ai.log', $logEntry, FILE_APPEND);
+
+    // Cancella messaggio di stato Wikipedia se presente
+    if ($wikiStatusMessageId) {
+        makeAPIRequest('deleteMessage', ['chat_id' => $chatID, 'message_id' => $wikiStatusMessageId]);
+    }
 
     saveMessageToContext($chatID, "rootbot", $response);
     return $response;

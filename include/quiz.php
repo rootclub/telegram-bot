@@ -164,29 +164,39 @@ function getRandomTopic() {
  * @return bool True se è una disambiguazione
  */
 function isDisambiguationPage($extract) {
+    // Prima rimuovi i template di navigazione "Se stai cercando..." che non indicano disambiguazione
+    $cleanExtract = preg_replace('/^Disambiguazione\s*[-–—]\s*Se stai cercando[^.]+\./iu', '', $extract);
+    $cleanExtract = trim($cleanExtract);
+
+    // Pattern che indicano VERE pagine di disambiguazione (liste di significati)
     $disambiguationPatterns = [
-        // Inglese
-        '/\bmay refer to\b/i',
-        '/\bcan refer to\b/i',
-        '/\bcommonly refers to\b/i',
-        '/\bmight refer to\b/i',
-        '/\brefers to\b.*:/i',
-        '/\bis the name of\b/i',
-        '/\bdisambiguation\b/i',
-        // Italiano
-        '/\bpuò riferirsi a\b/i',
-        '/\bpuò indicare\b/i',
-        '/\bsi può riferire a\b/i',
-        '/\bdisambigua\b/i',
-        '/\bdisambiguazione\b/i',
-        '/\bè il nome di\b/i',
+        // Inglese - pattern tipici di pagine disambigua
+        '/\bmay refer to\s*:/i',
+        '/\bcan refer to\s*:/i',
+        '/\bcommonly refers to\s*:/i',
+        '/\bmight refer to\s*:/i',
+        '/\brefers to\b[^.]*:/i',
+        '/\bis the name of\s*:/i',
+        // Italiano - pattern tipici di pagine disambigua
+        '/\bpuò riferirsi a\s*:/i',
+        '/\bpuò indicare\s*:/i',
+        '/\bsi può riferire a\s*:/i',
+        '/\bè il nome di\s*:/i',
+        // Pattern generico: se dopo la pulizia inizia subito con una lista
+        '/^[A-Z][^.]{0,50}\s*[-–—]\s*[A-Z]/u',  // "Nome – Descrizione" ripetuto = lista disambigua
     ];
 
     foreach ($disambiguationPatterns as $pattern) {
-        if (preg_match($pattern, $extract)) {
+        if (preg_match($pattern, $cleanExtract)) {
             return true;
         }
     }
+
+    // Se il testo pulito è molto corto, potrebbe essere una disambigua
+    if (strlen($cleanExtract) < 100) {
+        return true;
+    }
+
     return false;
 }
 
