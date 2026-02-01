@@ -252,6 +252,18 @@ function initDatabase() {
     $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_responses_poll_id ON quiz_responses(poll_id)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_responses_user_id ON quiz_responses(user_id)");
 
+    // Tabella cache TTS (voice file_id per evitare rigenerazione)
+    $db->exec("CREATE TABLE IF NOT EXISTS tts_cache (
+        message_id INTEGER NOT NULL,
+        chat_id INTEGER NOT NULL,
+        voice_file_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, message_id)
+    )");
+    // Pulizia automatica: rimuovi record più vecchi di 7 giorni
+    $weekAgoTTS = time() - (7 * 24 * 3600);
+    $db->exec("DELETE FROM tts_cache WHERE created_at < $weekAgoTTS");
+
     // Tabella per tracciare messaggi a cui il bot ha risposto (per gestire edited_message)
     $db->exec("CREATE TABLE IF NOT EXISTS bot_replied (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

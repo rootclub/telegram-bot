@@ -7,8 +7,15 @@ function makeAPIRequest($method, $parameters) {
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
     
-    // Gestione speciale per l'invio di file
-    if (isset($parameters['photo']) && $parameters['photo'] instanceof CURLFile) {
+    // Gestione speciale per l'invio di file (photo, voice, document, ecc.)
+    $hasCURLFile = false;
+    foreach ($parameters as $value) {
+        if ($value instanceof CURLFile) {
+            $hasCURLFile = true;
+            break;
+        }
+    }
+    if ($hasCURLFile) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, $parameters);
     } else {
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($parameters));

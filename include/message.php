@@ -299,7 +299,37 @@ function processMessage($message) {
 
     } elseif (preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/\brootbot\b/i', $text) || preg_match('/\brotbotbot\b/i', $text) || $isReplyToBot || ($chatType == 'private' && !empty($text) && !preg_match('/^\//', $text))) {
         // In chat privata risponde sempre (tranne comandi), in gruppo solo se menzionato
-        $response = _ai($chatID, $chatType, $text, $firstName);
+        $aiResponse = _ai($chatID, $chatType, $text, $firstName);
+
+        // Invia con pulsante "Ascolta" inline (se TTS abilitato)
+        $messageParams = [
+            'chat_id' => $chatID,
+            'text' => $aiResponse,
+            'parse_mode' => 'HTML',
+        ];
+        $isAiError = ($aiResponse === "Si è verificato un errore durante la comunicazione con l'AI.");
+        if (TTS_ENABLED && !$isAiError) {
+            $messageParams['reply_markup'] = json_encode([
+                'inline_keyboard' => [[
+                    ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
+                ]]
+            ]);
+        }
+        if ($chatType !== 'private') {
+            $messageParams['reply_to_message_id'] = $message['message_id'];
+        }
+
+        $result = makeAPIRequest('sendMessage', $messageParams);
+
+        // Se il reply fallisce, riprova senza reply
+        if (!$result || !$result['ok']) {
+            if (isset($result['error_code']) && $result['error_code'] == 400 &&
+                strpos($result['description'], 'message to be replied not found') !== false) {
+                unset($messageParams['reply_to_message_id']);
+                makeAPIRequest('sendMessage', $messageParams);
+            }
+        }
+        return;
 
     } elseif (preg_match('/^\/saluto(?:@rootbotbot)?(?:\s+-(\d+))?$/', $text, $salutoMatches)) {
         // Comando sperimentale - output in chat privata

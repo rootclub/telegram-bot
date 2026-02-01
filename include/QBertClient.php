@@ -193,6 +193,88 @@ class QBertClient {
 	}
 
 	/**
+	 * Invia richiesta multipart/form-data e aspetta il risultato
+	 * Necessario per endpoint che richiedono form-data (es. /voice-clone)
+	 *
+	 * @param string $service Nome del servizio QBert
+	 * @param string $path Path dell'endpoint
+	 * @param array $formData Dati form (chiave => valore)
+	 * @param string $priority Priorità QBert
+	 * @return array Risposta con 'status_code', 'headers', 'body'
+	 */
+	public function submitForm(
+		string $service,
+		string $path,
+		array $formData,
+		string $priority = self::PRIORITY_NORMAL
+	): array {
+		$url = $this->baseUrl . '/' . $service . '/' . ltrim($path, '/');
+
+		$result = $this->httpRequestForm($url, $formData, $priority);
+
+		if ($result['status_code'] === 202) {
+			$data = json_decode($result['body'], true);
+			if ($data && isset($data['ticket_id'])) {
+				return $this->waitForTicket($data['ticket_id']);
+			}
+		}
+
+		return $result;
+	}
+
+	/**
+	 * HTTP request multipart/form-data con cURL
+	 */
+	private function httpRequestForm(
+		string $url,
+		array $formData,
+		string $priority = self::PRIORITY_NORMAL
+	): array {
+		$ch = curl_init();
+
+		curl_setopt_array($ch, [
+			CURLOPT_URL => $url,
+			CURLOPT_RETURNTRANSFER => true,
+			CURLOPT_TIMEOUT => (int)$this->timeout,
+			CURLOPT_FOLLOWLOCATION => true,
+			CURLOPT_MAXREDIRS => 5,
+			CURLOPT_POST => true,
+			CURLOPT_POSTFIELDS => $formData, // array = cURL invia come multipart/form-data
+			CURLOPT_HTTPHEADER => ["X-Priority: $priority"],
+		]);
+
+		$responseHeaders = [];
+		curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $header) use (&$responseHeaders) {
+			$len = strlen($header);
+			$parts = explode(':', $header, 2);
+			if (count($parts) === 2) {
+				$responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+			}
+			return $len;
+		});
+
+		$body = curl_exec($ch);
+		$statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		$error = curl_error($ch);
+		curl_close($ch);
+
+		if ($body === false) {
+			return [
+				'status_code' => 0,
+				'headers' => [],
+				'body' => '',
+				'error' => $error,
+			];
+		}
+
+		return [
+			'status_code' => $statusCode,
+			'headers' => $responseHeaders,
+			'body' => $body,
+		];
+	}
+
+	/**
 	 * HTTP request con cURL
 	 */
 	private function httpRequest(

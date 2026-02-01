@@ -29,6 +29,11 @@ define('OLLAMA_QUIZ_REVIEWER_GPU', false);
 define('SILENCE_DURATION', 120); // Durata del silenzio in secondi (2 minuti)
 define('RESPONSE_PROBABILITY', 0.8); // Probabilità di risposta (80%)
 
+// TTS via qwen-tts (voice clone con profilo Bender)
+define('TTS_ENABLED', true);  // Abilita/disabilita pulsante "Ascolta" sulle risposte AI
+define('TTS_VOICE_PROFILE', 'bender');
+define('TTS_LANGUAGE', 'italian');
+
 setlocale(LC_TIME, 'it_IT.utf8');
 date_default_timezone_set('Europe/Rome');
 

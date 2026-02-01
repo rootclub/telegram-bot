@@ -1489,6 +1489,321 @@ function preAnalyzeLinks($context, $logFile) {
     return $linkMap;
 }
 
+// ============================================================
+// ======================== TTS ================================
+// ============================================================
+
+/**
+ * Genera audio TTS via QBert → qwen-tts /voice-clone con profilo
+ * @param string $text Testo da sintetizzare
+ * @return string|null Dati WAV binari o null in caso di errore
+ */
+function generateTTSViaQBert($text) {
+    $qbert = getQBertClient();
+
+    $formData = [
+        'profile' => TTS_VOICE_PROFILE,
+        'text' => $text,
+        'language' => TTS_LANGUAGE,
+        'format' => 'opus',
+    ];
+
+    $result = $qbert->submitForm('qwen-tts', '/voice-clone', $formData, QBertClient::PRIORITY_NORMAL);
+
+    if (!isset($result['status_code'])) {
+        // Ticket-based response (from waitForTicket)
+        if (isset($result['done']) && $result['done'] && !empty($result['body'])) {
+            return $result['body'];
+        }
+        return null;
+    }
+
+    if ($result['status_code'] === 200 && !empty($result['body'])) {
+        return $result['body'];
+    }
+
+    error_log("[TTS] QBert error: status=" . ($result['status_code'] ?? 'none') . " body_len=" . strlen($result['body'] ?? ''));
+    return null;
+}
+
+/**
+ * Genera TTS con refresh dell'indicatore "upload_voice" durante l'attesa
+ * @param string $text Testo da sintetizzare
+ * @param int $chatId Chat ID per typing indicator
+ * @return string|null Dati WAV binari o null
+ */
+function generateTTSWithTyping($text, $chatId) {
+    $qbert = getQBertClient();
+
+    $formData = [
+        'profile' => TTS_VOICE_PROFILE,
+        'text' => $text,
+        'language' => TTS_LANGUAGE,
+        'format' => 'opus',
+    ];
+
+    // Invia action iniziale
+    makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_voice']);
+    $lastTypingTime = time();
+
+    $url = $qbert->baseUrl ?? QBERT_URL;
+    // Usa submitForm che gestisce internamente ticket + waitForTicket
+    // Ma per avere il typing refresh, facciamo submit manuale
+
+    // Richiesta diretta: httpRequestForm è privato, usiamo submitForm
+    // submitForm già gestisce ticket internamente, ma è bloccante.
+    // Per il typing, usiamo un approccio con timeout breve e polling manuale.
+
+    // Invia la richiesta form-data direttamente
+    $requestUrl = rtrim(QBERT_URL, '/') . '/qwen-tts/voice-clone';
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $requestUrl,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 35,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $formData,
+        CURLOPT_HTTPHEADER => ['X-Priority: normal'],
+    ]);
+
+    $responseHeaders = [];
+    curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $header) use (&$responseHeaders) {
+        $len = strlen($header);
+        $parts = explode(':', $header, 2);
+        if (count($parts) === 2) {
+            $responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+        }
+        return $len;
+    });
+
+    $body = curl_exec($ch);
+    $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+
+    $logFile = dirname(__DIR__) . '/debug.log';
+    file_put_contents($logFile, "[TTS] QBert response: status=$statusCode, body_len=" . strlen($body ?: '') . ($curlError ? ", curl_error=$curlError" : "") . "\n", FILE_APPEND);
+
+    // Risposta diretta (non accodata)
+    if ($statusCode === 200 && !empty($body)) {
+        file_put_contents($logFile, "[TTS] Direct response (200), header=" . bin2hex(substr($body, 0, 4)) . "\n", FILE_APPEND);
+        return $body;
+    }
+
+    // Ticket 202: polling manuale con typing refresh
+    if ($statusCode === 202) {
+        $data = json_decode($body, true);
+        if (!$data || !isset($data['ticket_id'])) {
+            return null;
+        }
+
+        $ticketId = $data['ticket_id'];
+        $start = microtime(true);
+        $maxWait = 600.0;
+        $pollInterval = 2.0;
+
+        while (true) {
+            if ((microtime(true) - $start) > $maxWait) {
+                return null;
+            }
+
+            // Rinnova typing ogni 4 secondi
+            if ((time() - $lastTypingTime) >= 4) {
+                makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_voice']);
+                $lastTypingTime = time();
+            }
+
+            $ticket = $qbert->poll($ticketId);
+
+            if (!$ticket['found']) {
+                return null;
+            }
+
+            if ($ticket['done']) {
+                $ticketBody = $ticket['body'] ?? null;
+                file_put_contents($logFile, "[TTS] Ticket done, body_len=" . strlen($ticketBody ?: '') . ", header=" . bin2hex(substr($ticketBody ?: '', 0, 4)) . "\n", FILE_APPEND);
+                return $ticketBody;
+            }
+
+            if ($ticket['failed']) {
+                error_log("[TTS] Ticket failed: " . ($ticket['error'] ?? 'unknown'));
+                return null;
+            }
+
+            usleep((int)($pollInterval * 1000000));
+        }
+    }
+
+    error_log("[TTS] Unexpected status: $statusCode");
+    return null;
+}
+
+/**
+ * Cerca voce TTS in cache
+ * @return string|null file_id Telegram o null
+ */
+function getCachedTTS($chatId, $messageId) {
+    global $db;
+    $stmt = $db->prepare("SELECT voice_file_id FROM tts_cache WHERE chat_id = :chat_id AND message_id = :message_id");
+    $stmt->bindValue(':chat_id', $chatId, SQLITE3_INTEGER);
+    $stmt->bindValue(':message_id', $messageId, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+    $row = $result->fetchArray(SQLITE3_ASSOC);
+    return $row ? $row['voice_file_id'] : null;
+}
+
+/**
+ * Salva file_id voce TTS in cache
+ */
+function cacheTTS($chatId, $messageId, $fileId) {
+    global $db;
+    $stmt = $db->prepare("INSERT OR REPLACE INTO tts_cache (chat_id, message_id, voice_file_id, created_at) VALUES (:chat_id, :message_id, :file_id, :now)");
+    $stmt->bindValue(':chat_id', $chatId, SQLITE3_INTEGER);
+    $stmt->bindValue(':message_id', $messageId, SQLITE3_INTEGER);
+    $stmt->bindValue(':file_id', $fileId, SQLITE3_TEXT);
+    $stmt->bindValue(':now', time(), SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
+/**
+ * Gestisce il click sul pulsante "Ascolta" (callback TTS)
+ */
+function handleTTSCallback($callbackQuery) {
+    $callbackId = $callbackQuery['id'];
+    $message = $callbackQuery['message'];
+    $chatId = $message['chat']['id'];
+    $messageId = $message['message_id'];
+    $text = $message['text'] ?? '';
+
+    if (!TTS_ENABLED) {
+        makeAPIRequest('answerCallbackQuery', [
+            'callback_query_id' => $callbackId,
+            'text' => 'TTS non disponibile al momento.',
+            'show_alert' => false
+        ]);
+        return;
+    }
+
+    if (empty($text)) {
+        makeAPIRequest('answerCallbackQuery', [
+            'callback_query_id' => $callbackId,
+            'text' => 'Nessun testo da sintetizzare.',
+            'show_alert' => false
+        ]);
+        return;
+    }
+
+    // Cache hit: audio già generato, non re-inviare
+    $cachedFileId = getCachedTTS($chatId, $messageId);
+    if ($cachedFileId) {
+        makeAPIRequest('answerCallbackQuery', [
+            'callback_query_id' => $callbackId,
+            'text' => 'Audio già inviato.',
+            'show_alert' => false
+        ]);
+        return;
+    }
+
+    // Cache miss: genera audio
+    makeAPIRequest('answerCallbackQuery', [
+        'callback_query_id' => $callbackId,
+        'text' => 'Generazione audio...',
+        'show_alert' => false
+    ]);
+
+    // Genera TTS con typing indicator
+    $logFile = dirname(__DIR__) . '/debug.log';
+    file_put_contents($logFile, "[TTS] Generating for msg $messageId, text length=" . strlen($text) . "\n", FILE_APPEND);
+
+    $wavData = generateTTSWithTyping($text, $chatId);
+
+    if (!$wavData) {
+        file_put_contents($logFile, "[TTS] generateTTSWithTyping returned null\n", FILE_APPEND);
+        makeAPIRequest('sendMessage', [
+            'chat_id' => $chatId,
+            'text' => 'Errore nella generazione audio.',
+            'reply_to_message_id' => $messageId
+        ]);
+        return;
+    }
+
+    $audioData = $wavData;
+    file_put_contents($logFile, "[TTS] Got data: " . strlen($audioData) . " bytes, header=" . bin2hex(substr($audioData, 0, 4)) . "\n", FILE_APPEND);
+
+    // Verifica che sia OGG (header "OggS") o WAV (header "RIFF")
+    $header = substr($audioData, 0, 4);
+    $isOgg = ($header === 'OggS');
+    $isWav = ($header === 'RIFF');
+
+    if (!$isOgg && !$isWav) {
+        // Potrebbe essere base64
+        $decoded = base64_decode($audioData, true);
+        if ($decoded !== false) {
+            $decodedHeader = substr($decoded, 0, 4);
+            if ($decodedHeader === 'OggS' || $decodedHeader === 'RIFF') {
+                file_put_contents($logFile, "[TTS] Decoded base64 -> " . strlen($decoded) . " bytes\n", FILE_APPEND);
+                $audioData = $decoded;
+                $isOgg = ($decodedHeader === 'OggS');
+                $isWav = ($decodedHeader === 'RIFF');
+            }
+        }
+    }
+
+    if (!$isOgg && !$isWav) {
+        file_put_contents($logFile, "[TTS] Data is not OGG or WAV, first 100 bytes: " . substr($audioData, 0, 100) . "\n", FILE_APPEND);
+        makeAPIRequest('sendMessage', [
+            'chat_id' => $chatId,
+            'text' => 'Errore: risposta audio non valida.',
+            'reply_to_message_id' => $messageId
+        ]);
+        return;
+    }
+
+    // Salva su file temporaneo e invia
+    $tmpDir = sys_get_temp_dir();
+    $tmpFile = $tmpDir . '/tts_' . uniqid() . ($isOgg ? '.ogg' : '.wav');
+    file_put_contents($tmpFile, $audioData);
+    file_put_contents($logFile, "[TTS] File: " . filesize($tmpFile) . " bytes, format=" . ($isOgg ? 'ogg' : 'wav') . "\n", FILE_APPEND);
+
+    if ($isOgg) {
+        // OGG/Opus: invia come voice message (con forma d'onda in chat)
+        $voiceResult = makeAPIRequest('sendVoice', [
+            'chat_id' => $chatId,
+            'voice' => new CURLFile($tmpFile, 'audio/ogg', 'voice.ogg'),
+            'reply_to_message_id' => $messageId
+        ]);
+    } else {
+        // WAV: invia come file audio
+        $voiceResult = makeAPIRequest('sendAudio', [
+            'chat_id' => $chatId,
+            'audio' => new CURLFile($tmpFile, 'audio/wav', 'voice.wav'),
+            'reply_to_message_id' => $messageId
+        ]);
+    }
+    file_put_contents($logFile, "[TTS] Send result: ok=" . json_encode($voiceResult['ok'] ?? false) . "\n", FILE_APPEND);
+
+    // Salva file_id in cache
+    if ($voiceResult && $voiceResult['ok']) {
+        $fileId = $voiceResult['result']['voice']['file_id']
+                ?? $voiceResult['result']['audio']['file_id']
+                ?? null;
+        if ($fileId) {
+            cacheTTS($chatId, $messageId, $fileId);
+        }
+
+        // Rimuovi il pulsante "Ascolta" dal messaggio originale
+        makeAPIRequest('editMessageReplyMarkup', [
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'reply_markup' => json_encode(['inline_keyboard' => []])
+        ]);
+    }
+
+    // Cleanup
+    @unlink($tmpFile);
+}
+
 function _suggerisci_comando($comandoErrato, $chatId = null) {
     $model = OLLAMA_MODEL;
 

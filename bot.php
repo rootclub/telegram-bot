@@ -241,6 +241,10 @@ if (isset($update['message'])) {
     } elseif (strpos($data, 'annullo_ospite:') === 0) {
         handleAnnulloOspiteCallback($callbackQuery);
     }
+    // Callback TTS
+    elseif ($data === 'tts') {
+        handleTTSCallback($callbackQuery);
+    }
 } elseif (isset($update['poll_answer'])) {
     // Gestione risposte ai quiz
     handlePollAnswer($update['poll_answer']);
