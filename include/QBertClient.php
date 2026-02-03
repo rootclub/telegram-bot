@@ -3,10 +3,13 @@
  * QBert Client PHP - Client per il gateway QBert
  *
  * Uso:
- *   $qbert = new QBertClient('https://qbert.example.com');
+ *   $qbert = new QBertClient('https://qbert.example.com', appName: 'my_chatbot');
  *
  *   // Richiesta sincrona (blocca finché non arriva risposta)
  *   $response = $qbert->post('ollama', '/api/generate', ['model' => 'llama3', 'prompt' => 'ciao']);
+ *
+ *   // Con nota per il log
+ *   $response = $qbert->post('ollama', '/api/generate', ['model' => 'llama3', 'prompt' => 'ciao'], note: 'user_chat');
  *
  *   // Con webhook callback (QBert chiamerà l'URL quando il job è completato)
  *   $result = $qbert->submit('ollama', '/api/generate',
@@ -20,6 +23,13 @@
  *   if ($result['is_ticket']) {
  *       // Polling manuale con $qbert->poll($result['ticket_id'])
  *   }
+ *
+ *   // Richiesta multipart/form-data (es. voice clone con file audio)
+ *   $response = $qbert->post('qwen-tts', '/voice_clone', multipart: [
+ *       'text' => 'Ciao mondo',
+ *       'language' => 'it',
+ *       'audio' => new CURLFile('/path/to/sample.wav', 'audio/wav'),
+ *   ]);
  */
 
 class QBertClient {
@@ -27,6 +37,7 @@ class QBertClient {
 	private float $timeout;
 	private float $pollInterval;
 	private float $maxWait;
+	private string $appName;
 
 	const PRIORITY_URGENT = 'urgent';
 	const PRIORITY_NORMAL = 'normal';
@@ -36,17 +47,33 @@ class QBertClient {
 		string $baseUrl = 'http://127.0.0.1:1999',
 		float $timeout = 35.0,
 		float $pollInterval = 2.0,
-		float $maxWait = 600.0
+		float $maxWait = 600.0,
+		?string $appName = null
 	) {
 		$this->baseUrl = rtrim($baseUrl, '/');
 		$this->timeout = $timeout;
 		$this->pollInterval = $pollInterval;
 		$this->maxWait = $maxWait;
+		if ($appName !== null && $appName !== '') {
+			$this->appName = $appName;
+		} else {
+			$this->appName = 'anonymous-' . getmypid();
+			trigger_error(
+				"QBertClient: appName non specificato, registrato come '{$this->appName}'. " .
+				"Usa new QBertClient(appName: 'my_app') per identificare il client nei log.",
+				E_USER_WARNING
+			);
+		}
 	}
 
 	/**
 	 * Invia richiesta e aspetta il risultato (gestisce ticket automaticamente)
 	 * ATTENZIONE: può bloccare per molto tempo, usare solo in script CLI/worker
+	 *
+	 * @param array|null $json Body JSON
+	 * @param array|null $multipart Campi multipart/form-data. Valori possono essere:
+	 *   - string/int/float: campo form normale
+	 *   - CURLFile: file upload (es. new CURLFile('/path/to/file.wav', 'audio/wav'))
 	 */
 	public function request(
 		string $method,
@@ -54,9 +81,11 @@ class QBertClient {
 		string $path,
 		?array $json = null,
 		string $priority = self::PRIORITY_NORMAL,
-		array $headers = []
+		array $headers = [],
+		string $note = '',
+		?array $multipart = null
 	): array {
-		$result = $this->submit($method, $service, $path, $json, $priority, $headers);
+		$result = $this->submit($method, $service, $path, $json, $priority, $headers, note: $note, multipart: $multipart);
 
 		if (!$result['is_ticket']) {
 			return $result;
@@ -65,12 +94,12 @@ class QBertClient {
 		return $this->waitForTicket($result['ticket_id']);
 	}
 
-	public function get(string $service, string $path, string $priority = self::PRIORITY_NORMAL): array {
-		return $this->request('GET', $service, $path, null, $priority);
+	public function get(string $service, string $path, string $priority = self::PRIORITY_NORMAL, string $note = ''): array {
+		return $this->request('GET', $service, $path, null, $priority, note: $note);
 	}
 
-	public function post(string $service, string $path, ?array $json = null, string $priority = self::PRIORITY_NORMAL): array {
-		return $this->request('POST', $service, $path, $json, $priority);
+	public function post(string $service, string $path, ?array $json = null, string $priority = self::PRIORITY_NORMAL, string $note = '', ?array $multipart = null): array {
+		return $this->request('POST', $service, $path, $json, $priority, note: $note, multipart: $multipart);
 	}
 
 	/**
@@ -86,15 +115,25 @@ class QBertClient {
 		?array $json = null,
 		string $priority = self::PRIORITY_NORMAL,
 		array $headers = [],
-		?string $callbackUrl = null
+		?string $callbackUrl = null,
+		string $note = '',
+		?array $multipart = null
 	): array {
+		if ($json !== null && $multipart !== null) {
+			throw new QBertException('Cannot use both json and multipart in the same request');
+		}
+
 		$url = $this->baseUrl . '/' . $service . '/' . ltrim($path, '/');
 		$headers['X-Priority'] = $priority;
+		$headers['X-App-Name'] = $this->appName;
+		if ($note !== '') {
+			$headers['X-Note'] = $note;
+		}
 		if ($callbackUrl !== null) {
 			$headers['X-Callback-Url'] = $callbackUrl;
 		}
 
-		$response = $this->httpRequest($method, $url, $json, $headers);
+		$response = $this->httpRequest($method, $url, $json, $headers, $multipart);
 
 		if ($response['status_code'] === 202) {
 			$data = json_decode($response['body'], true);
@@ -193,95 +232,14 @@ class QBertClient {
 	}
 
 	/**
-	 * Invia richiesta multipart/form-data e aspetta il risultato
-	 * Necessario per endpoint che richiedono form-data (es. /voice-clone)
-	 *
-	 * @param string $service Nome del servizio QBert
-	 * @param string $path Path dell'endpoint
-	 * @param array $formData Dati form (chiave => valore)
-	 * @param string $priority Priorità QBert
-	 * @return array Risposta con 'status_code', 'headers', 'body'
-	 */
-	public function submitForm(
-		string $service,
-		string $path,
-		array $formData,
-		string $priority = self::PRIORITY_NORMAL
-	): array {
-		$url = $this->baseUrl . '/' . $service . '/' . ltrim($path, '/');
-
-		$result = $this->httpRequestForm($url, $formData, $priority);
-
-		if ($result['status_code'] === 202) {
-			$data = json_decode($result['body'], true);
-			if ($data && isset($data['ticket_id'])) {
-				return $this->waitForTicket($data['ticket_id']);
-			}
-		}
-
-		return $result;
-	}
-
-	/**
-	 * HTTP request multipart/form-data con cURL
-	 */
-	private function httpRequestForm(
-		string $url,
-		array $formData,
-		string $priority = self::PRIORITY_NORMAL
-	): array {
-		$ch = curl_init();
-
-		curl_setopt_array($ch, [
-			CURLOPT_URL => $url,
-			CURLOPT_RETURNTRANSFER => true,
-			CURLOPT_TIMEOUT => (int)$this->timeout,
-			CURLOPT_FOLLOWLOCATION => true,
-			CURLOPT_MAXREDIRS => 5,
-			CURLOPT_POST => true,
-			CURLOPT_POSTFIELDS => $formData, // array = cURL invia come multipart/form-data
-			CURLOPT_HTTPHEADER => ["X-Priority: $priority"],
-		]);
-
-		$responseHeaders = [];
-		curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $header) use (&$responseHeaders) {
-			$len = strlen($header);
-			$parts = explode(':', $header, 2);
-			if (count($parts) === 2) {
-				$responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
-			}
-			return $len;
-		});
-
-		$body = curl_exec($ch);
-		$statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-		$error = curl_error($ch);
-		curl_close($ch);
-
-		if ($body === false) {
-			return [
-				'status_code' => 0,
-				'headers' => [],
-				'body' => '',
-				'error' => $error,
-			];
-		}
-
-		return [
-			'status_code' => $statusCode,
-			'headers' => $responseHeaders,
-			'body' => $body,
-		];
-	}
-
-	/**
 	 * HTTP request con cURL
 	 */
 	private function httpRequest(
 		string $method,
 		string $url,
 		?array $json = null,
-		array $headers = []
+		array $headers = [],
+		?array $multipart = null
 	): array {
 		$ch = curl_init();
 
@@ -300,7 +258,10 @@ class QBertClient {
 
 		if ($method === 'POST') {
 			curl_setopt($ch, CURLOPT_POST, true);
-			if ($json !== null) {
+			if ($multipart !== null) {
+				// multipart/form-data — cURL gestisce boundary e Content-Type automaticamente
+				curl_setopt($ch, CURLOPT_POSTFIELDS, $multipart);
+			} elseif ($json !== null) {
 				$body = json_encode($json);
 				curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
 				$curlHeaders[] = 'Content-Type: application/json';

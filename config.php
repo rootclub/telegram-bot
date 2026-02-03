@@ -1,6 +1,7 @@
 <?php
 // Costanti e configurazioni
 define('BOT_TOKEN', 'TELEGRAM_TOKEN');
+define('BOT_NAME', 'rootbot');  // Nome del bot impostato su BotFather (usato come appName per QBert)
 define('WEBHOOK_URL', 'https://www.yourdomain.it/telegram/bot.php');
 define('DB_FILE', 'telegram_bot.sqlite');
 define('IMAGE_SAVE_PATH', __DIR__ . '/images/');

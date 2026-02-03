@@ -11,7 +11,7 @@ require_once __DIR__ . '/QBertClient.php';
 function getQBertClient() {
     static $qbert = null;
     if ($qbert === null) {
-        $qbert = new QBertClient(QBERT_URL, timeout: 120.0, maxWait: 600.0);
+        $qbert = new QBertClient(QBERT_URL, timeout: 120.0, maxWait: 600.0, appName: BOT_NAME);
     }
     return $qbert;
 }
@@ -1494,39 +1494,6 @@ function preAnalyzeLinks($context, $logFile) {
 // ============================================================
 
 /**
- * Genera audio TTS via QBert → qwen-tts /voice-clone con profilo
- * @param string $text Testo da sintetizzare
- * @return string|null Dati WAV binari o null in caso di errore
- */
-function generateTTSViaQBert($text) {
-    $qbert = getQBertClient();
-
-    $formData = [
-        'profile' => TTS_VOICE_PROFILE,
-        'text' => $text,
-        'language' => TTS_LANGUAGE,
-        'format' => 'opus',
-    ];
-
-    $result = $qbert->submitForm('qwen-tts', '/voice-clone', $formData, QBertClient::PRIORITY_NORMAL);
-
-    if (!isset($result['status_code'])) {
-        // Ticket-based response (from waitForTicket)
-        if (isset($result['done']) && $result['done'] && !empty($result['body'])) {
-            return $result['body'];
-        }
-        return null;
-    }
-
-    if ($result['status_code'] === 200 && !empty($result['body'])) {
-        return $result['body'];
-    }
-
-    error_log("[TTS] QBert error: status=" . ($result['status_code'] ?? 'none') . " body_len=" . strlen($result['body'] ?? ''));
-    return null;
-}
-
-/**
  * Genera TTS con refresh dell'indicatore "upload_voice" durante l'attesa
  * @param string $text Testo da sintetizzare
  * @param int $chatId Chat ID per typing indicator
@@ -1546,97 +1513,57 @@ function generateTTSWithTyping($text, $chatId) {
     makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_voice']);
     $lastTypingTime = time();
 
-    $url = $qbert->baseUrl ?? QBERT_URL;
-    // Usa submitForm che gestisce internamente ticket + waitForTicket
-    // Ma per avere il typing refresh, facciamo submit manuale
-
-    // Richiesta diretta: httpRequestForm è privato, usiamo submitForm
-    // submitForm già gestisce ticket internamente, ma è bloccante.
-    // Per il typing, usiamo un approccio con timeout breve e polling manuale.
-
-    // Invia la richiesta form-data direttamente
-    $requestUrl = rtrim(QBERT_URL, '/') . '/qwen-tts/voice-clone';
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL => $requestUrl,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 35,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => $formData,
-        CURLOPT_HTTPHEADER => ['X-Priority: normal'],
-    ]);
-
-    $responseHeaders = [];
-    curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $header) use (&$responseHeaders) {
-        $len = strlen($header);
-        $parts = explode(':', $header, 2);
-        if (count($parts) === 2) {
-            $responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
-        }
-        return $len;
-    });
-
-    $body = curl_exec($ch);
-    $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curlError = curl_error($ch);
-    curl_close($ch);
-
     $logFile = dirname(__DIR__) . '/debug.log';
-    file_put_contents($logFile, "[TTS] QBert response: status=$statusCode, body_len=" . strlen($body ?: '') . ($curlError ? ", curl_error=$curlError" : "") . "\n", FILE_APPEND);
+
+    // Submit non-bloccante via QBertClient (con multipart e header corretti)
+    $result = $qbert->submit('POST', 'qwen-tts', '/voice-clone', multipart: $formData, note: 'tts_typing');
 
     // Risposta diretta (non accodata)
-    if ($statusCode === 200 && !empty($body)) {
-        file_put_contents($logFile, "[TTS] Direct response (200), header=" . bin2hex(substr($body, 0, 4)) . "\n", FILE_APPEND);
-        return $body;
+    if (!$result['is_ticket']) {
+        file_put_contents($logFile, "[TTS] Direct response ({$result['status_code']}), body_len=" . strlen($result['body'] ?: '') . "\n", FILE_APPEND);
+        if ($result['status_code'] === 200 && !empty($result['body'])) {
+            return $result['body'];
+        }
+        error_log("[TTS] Unexpected status: " . $result['status_code']);
+        return null;
     }
 
-    // Ticket 202: polling manuale con typing refresh
-    if ($statusCode === 202) {
-        $data = json_decode($body, true);
-        if (!$data || !isset($data['ticket_id'])) {
+    // Ticket: polling manuale con typing refresh
+    $ticketId = $result['ticket_id'];
+    $start = microtime(true);
+    $maxWait = 600.0;
+    $pollInterval = 2.0;
+
+    while (true) {
+        if ((microtime(true) - $start) > $maxWait) {
             return null;
         }
 
-        $ticketId = $data['ticket_id'];
-        $start = microtime(true);
-        $maxWait = 600.0;
-        $pollInterval = 2.0;
-
-        while (true) {
-            if ((microtime(true) - $start) > $maxWait) {
-                return null;
-            }
-
-            // Rinnova typing ogni 4 secondi
-            if ((time() - $lastTypingTime) >= 4) {
-                makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_voice']);
-                $lastTypingTime = time();
-            }
-
-            $ticket = $qbert->poll($ticketId);
-
-            if (!$ticket['found']) {
-                return null;
-            }
-
-            if ($ticket['done']) {
-                $ticketBody = $ticket['body'] ?? null;
-                file_put_contents($logFile, "[TTS] Ticket done, body_len=" . strlen($ticketBody ?: '') . ", header=" . bin2hex(substr($ticketBody ?: '', 0, 4)) . "\n", FILE_APPEND);
-                return $ticketBody;
-            }
-
-            if ($ticket['failed']) {
-                error_log("[TTS] Ticket failed: " . ($ticket['error'] ?? 'unknown'));
-                return null;
-            }
-
-            usleep((int)($pollInterval * 1000000));
+        // Rinnova typing ogni 4 secondi
+        if ((time() - $lastTypingTime) >= 4) {
+            makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_voice']);
+            $lastTypingTime = time();
         }
-    }
 
-    error_log("[TTS] Unexpected status: $statusCode");
-    return null;
+        $ticket = $qbert->poll($ticketId);
+
+        if (!$ticket['found']) {
+            return null;
+        }
+
+        if ($ticket['done']) {
+            $ticketBody = $ticket['body'] ?? null;
+            file_put_contents($logFile, "[TTS] Ticket done, body_len=" . strlen($ticketBody ?: '') . "\n", FILE_APPEND);
+            return $ticketBody;
+        }
+
+        if ($ticket['failed']) {
+            error_log("[TTS] Ticket failed: " . ($ticket['error'] ?? 'unknown'));
+            return null;
+        }
+
+        usleep((int)($pollInterval * 1000000));
+    }
 }
 
 /**
