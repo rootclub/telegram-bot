@@ -151,6 +151,7 @@ class QBertClient {
 			'status_code' => $response['status_code'],
 			'headers' => $response['headers'],
 			'body' => $response['body'],
+			'body_bytes' => $response['body'],
 			'json' => $this->tryJsonDecode($response['body']),
 		];
 	}
@@ -185,10 +186,24 @@ class QBertClient {
 		];
 
 		if ($status === 'done') {
-			$result['status_code'] = $data['response']['status_code'] ?? 200;
-			$result['headers'] = $data['response']['headers'] ?? [];
-			$result['body'] = $data['response']['body'] ?? '';
-			$result['json'] = $this->tryJsonDecode($result['body']);
+			$inner = $data['response'] ?? [];
+			$bodyBase64 = $inner['body_base64'] ?? null;
+			$bodyText = $inner['body_text'] ?? null;
+			if ($bodyBase64 !== null) {
+				$bodyBytes = base64_decode($bodyBase64, true);
+				if ($bodyBytes === false) {
+					$bodyBytes = '';
+				}
+			} elseif ($bodyText !== null) {
+				$bodyBytes = $bodyText;
+			} else {
+				$bodyBytes = '';
+			}
+			$result['status_code'] = $inner['status_code'] ?? 200;
+			$result['headers'] = $inner['headers'] ?? [];
+			$result['body'] = $bodyText !== null ? $bodyText : $bodyBytes;
+			$result['body_bytes'] = $bodyBytes;
+			$result['json'] = $inner['body_json'] ?? ($bodyText !== null ? $this->tryJsonDecode($bodyText) : null);
 		}
 
 		if ($status === 'failed') {
@@ -201,6 +216,12 @@ class QBertClient {
 	/**
 	 * Aspetta che un ticket sia completato (polling loop)
 	 * ATTENZIONE: blocca, usare solo in script CLI/worker
+	 *
+	 * Il return è normalizzato tramite ensureResponseShape() così che le chiavi
+	 * status_code / headers / body / body_bytes / json siano sempre presenti
+	 * (anche su timeout, ticket non trovato, abbandono, fallimento backend).
+	 * Codice consumer del tipo `if ($resp['status_code'] >= 400)` funziona
+	 * uniformemente per sync e ticket.
 	 */
 	public function waitForTicket(string $ticketId): array {
 		$start = microtime(true);
@@ -208,27 +229,57 @@ class QBertClient {
 		while (true) {
 			$elapsed = microtime(true) - $start;
 			if ($elapsed > $this->maxWait) {
-				return [
+				return $this->ensureResponseShape([
 					'found' => true,
 					'ticket_id' => $ticketId,
 					'status' => 'timeout',
+					'done' => false,
 					'failed' => true,
+					'status_code' => 504,
 					'error' => "Timeout after {$this->maxWait}s",
-				];
+				]);
 			}
 
 			$result = $this->poll($ticketId);
 
 			if (!$result['found']) {
-				return $result;
+				$result['status_code'] = 404;
+				return $this->ensureResponseShape($result);
 			}
 
-			if ($result['done'] || $result['failed']) {
-				return $result;
+			if ($result['done']) {
+				return $this->ensureResponseShape($result);
+			}
+
+			if ($result['failed']) {
+				// abbandono vs fallimento backend
+				if (!isset($result['status_code'])) {
+					$result['status_code'] = ($result['status'] ?? '') === 'abandoned' ? 410 : 502;
+				}
+				return $this->ensureResponseShape($result);
 			}
 
 			usleep((int)($this->pollInterval * 1000000));
 		}
+	}
+
+	/**
+	 * Garantisce che l'array di risposta abbia sempre le chiavi
+	 * status_code / headers / body / body_bytes / json / done / failed,
+	 * popolandole con default sensati se mancanti. Serve a uniformare la
+	 * shape tra path sync e path ticket per i consumer di request().
+	 */
+	private function ensureResponseShape(array $result): array {
+		$result['done'] = $result['done'] ?? false;
+		$result['failed'] = $result['failed'] ?? !$result['done'];
+		$result['status_code'] = $result['status_code'] ?? 502;
+		$result['headers'] = $result['headers'] ?? [];
+		$result['body'] = $result['body'] ?? '';
+		$result['body_bytes'] = $result['body_bytes'] ?? '';
+		if (!array_key_exists('json', $result)) {
+			$result['json'] = null;
+		}
+		return $result;
 	}
 
 	/**

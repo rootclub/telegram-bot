@@ -250,6 +250,12 @@ if (isset($update['message'])) {
     // Callback TTS
     elseif ($data === 'tts') {
         handleTTSCallback($callbackQuery);
+    } elseif ($data === 'tts_generating') {
+        makeAPIRequest('answerCallbackQuery', [
+            'callback_query_id' => $callbackQuery['id'],
+            'text' => 'Generazione già in corso, attendi...',
+            'show_alert' => false
+        ]);
     }
 } elseif (isset($update['poll_answer'])) {
     // Gestione risposte ai quiz

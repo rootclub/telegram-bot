@@ -1552,7 +1552,7 @@ function generateTTSWithTyping($text, $chatId) {
         }
 
         if ($ticket['done']) {
-            $ticketBody = $ticket['body'] ?? null;
+            $ticketBody = $ticket['body_bytes'] ?? $ticket['body'] ?? null;
             file_put_contents($logFile, "[TTS] Ticket done, body_len=" . strlen($ticketBody ?: '') . "\n", FILE_APPEND);
             return $ticketBody;
         }
@@ -1635,8 +1635,17 @@ function handleTTSCallback($callbackQuery) {
     // Cache miss: genera audio
     makeAPIRequest('answerCallbackQuery', [
         'callback_query_id' => $callbackId,
-        'text' => 'Generazione audio...',
+        'text' => 'Generazione audio in corso...',
         'show_alert' => false
+    ]);
+
+    // Sostituisci il pulsante con "Generazione in corso..." per feedback visivo e anti-doppio-click
+    makeAPIRequest('editMessageReplyMarkup', [
+        'chat_id' => $chatId,
+        'message_id' => $messageId,
+        'reply_markup' => json_encode(['inline_keyboard' => [
+            [['text' => "\u{23F3} Generazione in corso...", 'callback_data' => 'tts_generating']]
+        ]])
     ]);
 
     // Genera TTS con typing indicator
