@@ -1,0 +1,4 @@
+FTP_HOST=ftp.tuoserver.com                                                                        
+FTP_USER=utente                                              
+FTP_PASS=password                                                                                 
+FTP_REMOTE_DIR=/percorso/remoto/del/bot
