@@ -53,8 +53,9 @@ if (isset($update['message'])) {
 
     // Gestisci testo
     $messageText = $message['text'] ?? '';
-    $messageText = str_replace('@bot', '', $messageText);
+    $messageText = str_replace('@rootbotbot', '', $messageText);
     $messageText = str_replace('@rootbot', '', $messageText);
+    $messageText = str_replace('@bot', '', $messageText);
     $messageText = str_replace('@root', '', $messageText);
 
     // PRIMA: Gestisci immagini - analizza e salva nel contesto PRIMA di processMessage
@@ -81,11 +82,12 @@ if (isset($update['message'])) {
 
             // Controlla se la caption menziona il bot
             $captionMentionsBot = !empty($caption) && (
+                preg_match('/@rootbotbot\b/', $caption) ||
+                preg_match('/@rootbot\b/', $caption) ||
                 preg_match('/@root\b/', $caption) ||
                 preg_match('/@bot\b/', $caption) ||
-                preg_match('/@rootbot\b/', $caption) ||
-                preg_match('/\brootbot\b/i', $caption) ||
-                preg_match('/\brotbotbot\b/i', $caption)
+                preg_match('/\brootbotbot\b/i', $caption) ||
+                preg_match('/\brootbot\b/i', $caption)
             );
 
             // Rispondi con l'analisi in chat privata o quando menzionato nel gruppo
@@ -125,11 +127,12 @@ if (isset($update['message'])) {
             $botImageAnalysis = "[analisi immagine: $imageDescription]";
 
             $captionMentionsBot = !empty($caption) && (
+                preg_match('/@rootbotbot\b/', $caption) ||
+                preg_match('/@rootbot\b/', $caption) ||
                 preg_match('/@root\b/', $caption) ||
                 preg_match('/@bot\b/', $caption) ||
-                preg_match('/@rootbot\b/', $caption) ||
-                preg_match('/\brootbot\b/i', $caption) ||
-                preg_match('/\brotbotbot\b/i', $caption)
+                preg_match('/\brootbotbot\b/i', $caption) ||
+                preg_match('/\brootbot\b/i', $caption)
             );
 
             if ($chatType == 'private' || $captionMentionsBot) {
@@ -154,11 +157,12 @@ if (isset($update['message'])) {
     // Prima di processare, marca come "in elaborazione" se il messaggio invoca il bot
     // (per evitare doppie risposte se il messaggio viene editato durante l'elaborazione)
     $textToCheck = $message['text'] ?? $message['caption'] ?? '';
-    $mentionsBot = preg_match('/@root\b/', $textToCheck) ||
-                   preg_match('/@bot\b/', $textToCheck) ||
+    $mentionsBot = preg_match('/@rootbotbot\b/', $textToCheck) ||
                    preg_match('/@rootbot\b/', $textToCheck) ||
+                   preg_match('/@root\b/', $textToCheck) ||
+                   preg_match('/@bot\b/', $textToCheck) ||
+                   preg_match('/\brootbotbot\b/i', $textToCheck) ||
                    preg_match('/\brootbot\b/i', $textToCheck) ||
-                   preg_match('/\brotbotbot\b/i', $textToCheck) ||
                    $chatType == 'private';
 
     if ($mentionsBot) {
@@ -176,11 +180,12 @@ if (isset($update['message'])) {
     $text = $editedMessage['text'] ?? $editedMessage['caption'] ?? '';
 
     // Controlla se il messaggio menziona il bot
-    $mentionsBot = preg_match('/@root\b/', $text) ||
-                   preg_match('/@bot\b/', $text) ||
+    $mentionsBot = preg_match('/@rootbotbot\b/', $text) ||
                    preg_match('/@rootbot\b/', $text) ||
-                   preg_match('/\brootbot\b/i', $text) ||
-                   preg_match('/\brotbotbot\b/i', $text);
+                   preg_match('/@root\b/', $text) ||
+                   preg_match('/@bot\b/', $text) ||
+                   preg_match('/\brootbotbot\b/i', $text) ||
+                   preg_match('/\brootbot\b/i', $text);
 
     // Processa solo se: (menziona il bot O è chat privata) E non abbiamo già risposto
     if (($mentionsBot || $chatType == 'private') && !hasAlreadyReplied($chatId, $messageId)) {
@@ -188,8 +193,9 @@ if (isset($update['message'])) {
         if (markAsReplied($chatId, $messageId)) {
             // Salva nel contesto e processa come un messaggio normale
             $userName = $editedMessage['from']['first_name'] ?? 'Utente';
-            $messageText = str_replace('@bot', '', $text);
+            $messageText = str_replace('@rootbotbot', '', $text);
             $messageText = str_replace('@rootbot', '', $messageText);
+            $messageText = str_replace('@bot', '', $messageText);
             $messageText = str_replace('@root', '', $messageText);
 
             if (!empty(trim($messageText))) {

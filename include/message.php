@@ -297,7 +297,7 @@ function processMessage($message) {
             $response = $quizError;
         }
 
-    } elseif (preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/\brootbot\b/i', $text) || preg_match('/\brotbotbot\b/i', $text) || $isReplyToBot || ($chatType == 'private' && !empty($text) && !preg_match('/^\//', $text))) {
+    } elseif (preg_match('/@rootbotbot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/\brootbotbot\b/i', $text) || preg_match('/\brootbot\b/i', $text) || $isReplyToBot || ($chatType == 'private' && !empty($text) && !preg_match('/^\//', $text))) {
         // In chat privata risponde sempre (tranne comandi), in gruppo solo se menzionato
         $aiResponse = _ai($chatID, $chatType, $text, $firstName);
 

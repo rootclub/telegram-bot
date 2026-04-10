@@ -173,12 +173,14 @@ function _mangerei($text, $userId, $userName, $chatID) {
 function richiedi_selezione_pappatoia($orderId, $item, $chatID) {
     global $db;
     
-    $stmt = $db->prepare("SELECT id, pappatoia FROM pappatoie ORDER BY pappatoia");
+    $stmt = $db->prepare("SELECT id, pappatoia, giorni_chiusura FROM pappatoie ORDER BY pappatoia");
     $result = $stmt->execute();
-    
+
     $keyboard = [];
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
-        $keyboard[] = [['text' => $row['pappatoia'], 'callback_data' => "seleziona_pappatoia:{$orderId}:{$row['id']}"]];
+        if (is_asporto_aperto($row['giorni_chiusura'])) {
+            $keyboard[] = [['text' => $row['pappatoia'], 'callback_data' => "seleziona_pappatoia:{$orderId}:{$row['id']}"]];
+        }
     }
     
     $replyMarkup = [

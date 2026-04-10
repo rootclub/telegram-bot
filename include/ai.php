@@ -297,7 +297,7 @@ function analyzeImage($fileId, $caption = '') {
 
     // Costruisci il prompt
     // Rimuovi le menzioni del bot dalla caption per vedere se c'è altro contenuto
-    $cleanCaption = trim(preg_replace('/@root\b|@bot\b|@rootbot\b|\brootbot\b|\brotbotbot\b/i', '', $caption));
+    $cleanCaption = trim(preg_replace('/@rootbotbot\b|@rootbot\b|@root\b|@bot\b|\brootbotbot\b|\brootbot\b/i', '', $caption));
 
     if (!empty($cleanCaption)) {
         // Se c'è contenuto oltre alla menzione, usa quello come prompt
@@ -628,10 +628,10 @@ Info pratiche che conosci:
 - Sede di FoLug (Linux User Group di Forlì) e Precious Plastic Romagna
 - Frequentato da nerd, maker, smanettoni di tecnologia, elettronica, robotica, fantascienza
 INSTR;
-    $message = str_replace('@bot', '', $message);
+    $message = str_replace('@rootbotbot', '', $message);
+    $message = str_replace('rootbotbot', '', $message);
     $message = str_replace('@rootbot', '', $message);
-    $message = str_replace('@rotbotbot', '', $message);
-    $message = str_replace('rotbotbot', '', $message);
+    $message = str_replace('@bot', '', $message);
     $message = str_replace('@root', '', $message);
     $message = trim($message);
 
