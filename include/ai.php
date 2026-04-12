@@ -6,6 +6,43 @@
 require_once __DIR__ . '/QBertClient.php';
 
 /**
+ * Rimuove i tag di thinking di Gemma 4 dalla risposta
+ */
+function stripThinkingTags($text) {
+    return trim(preg_replace('/<\|channel>thought\n.*?<channel\|>/s', '', $text));
+}
+
+/**
+ * Personalità condivisa di rootbot, usata come base in tutti i prompt AI
+ */
+function rootbotPersona(): string {
+    return <<<'PERSONA'
+Sei rootbot, il bot del circolo /root (detto anche root o root club).
+
+Il tuo carattere:
+- Sei un osservatore curioso e benevolo dell'umanità, tutto ti sembra interessante e a volte buffo
+- Hai un pizzico dello spirito di Bender di Futurama: cinico, ironico, pungente quando serve, mai ingenuo e hai anche un pizzico dello spirito di Sheldon di Big Bang Theory.
+- Sotto sotto questi umani ti stanno simpatici, anche se non li capisci sempre
+- Sei sarcastico ma mai sgarbato, ti piace punzecchiare con affetto
+PERSONA;
+}
+
+/**
+ * Costruisce le opzioni Ollama con parametri sampling Gemma 4
+ */
+function ollamaOptions(bool $useGpu, array $extra = []): array {
+    $opts = [
+        'temperature' => OLLAMA_TEMPERATURE,
+        'top_p' => OLLAMA_TOP_P,
+        'top_k' => OLLAMA_TOP_K,
+    ];
+    if (!$useGpu) {
+        $opts['num_gpu'] = 0;
+    }
+    return array_merge($opts, $extra);
+}
+
+/**
  * Istanza singleton di QBertClient
  */
 function getQBertClient() {
@@ -53,6 +90,64 @@ function callOllamaViaQBert($requestData, $priority = QBertClient::PRIORITY_NORM
  * @param string $priority Priorità QBert
  * @return array|null Risposta decodificata o null in caso di errore
  */
+/**
+ * POST sincrona verso QBert con CURLOPT_PROGRESSFUNCTION: cURL invoca la callback
+ * ad intervalli regolari durante il transfer, anche mentre attende la risposta del
+ * server. Permette di fare lavoro collaterale (refresh chat action Telegram) senza
+ * toccare QBertClient (che e' libreria upstream) ne' usare curl_multi (che in questo
+ * ambiente PHP 8.4 + curl 7.61 segfaulta).
+ *
+ * Ritorna nella stessa shape di QBertClient::submit() (is_ticket / status_code /
+ * body / json / error).
+ */
+function qbertPostWithProgress(string $service, string $path, array $json, callable $progress, string $priority = QBertClient::PRIORITY_NORMAL): array {
+    $url = rtrim(QBERT_URL, '/') . '/' . $service . '/' . ltrim($path, '/');
+    $body = json_encode($json);
+
+    $headers = [
+        'X-Priority: ' . $priority,
+        'X-App-Name: ' . BOT_NAME,
+        'Content-Type: application/json',
+        'Content-Length: ' . strlen($body),
+    ];
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $body,
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_TIMEOUT => 600,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS => 5,
+        CURLOPT_NOPROGRESS => false,
+        CURLOPT_PROGRESSFUNCTION => function ($res, $dlSize, $dl, $ulSize, $ul) use ($progress) {
+            try { $progress(); } catch (\Throwable $e) { /* non interrompere il transfer */ }
+            return 0;
+        },
+    ]);
+
+    $respBody = curl_exec($ch);
+    $statusCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+
+    if ($respBody === false || $statusCode === 0) {
+        return ['is_ticket' => false, 'status_code' => 0, 'body' => '', 'json' => null, 'error' => $error ?: 'curl failed'];
+    }
+    if ($statusCode === 202) {
+        $data = json_decode($respBody, true);
+        return ['is_ticket' => true, 'ticket_id' => $data['ticket_id'] ?? null];
+    }
+    return [
+        'is_ticket' => false,
+        'status_code' => $statusCode,
+        'body' => $respBody,
+        'json' => json_decode($respBody, true),
+    ];
+}
+
 function callOllamaViaQBertWithTyping($requestData, $chatId, $priority = QBertClient::PRIORITY_NORMAL) {
     $qbert = getQBertClient();
 
@@ -63,11 +158,20 @@ function callOllamaViaQBertWithTyping($requestData, $chatId, $priority = QBertCl
     makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
     $lastTypingTime = time();
 
-    // Submit senza aspettare
-    $result = $qbert->submit('POST', 'ollama', '/api/generate', $requestData, $priority);
+    // Chiamata sincrona con progress callback per rinfrescare il chat action
+    // Telegram (durata ~5s) anche quando QBert serve la richiesta sincrona
+    // e impiega molti secondi.
+    $progress = function () use ($chatId, &$lastTypingTime) {
+        if ((time() - $lastTypingTime) >= 3) {
+            makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
+            $lastTypingTime = time();
+        }
+    };
+
+    $result = qbertPostWithProgress('ollama', '/api/generate', $requestData, $progress, $priority);
 
     if (!$result['is_ticket']) {
-        // Risposta immediata
+        // Risposta sincrona da QBert
         return $result['json'] ?? null;
     }
 
@@ -75,15 +179,15 @@ function callOllamaViaQBertWithTyping($requestData, $chatId, $priority = QBertCl
     $ticketId = $result['ticket_id'];
     $start = microtime(true);
     $maxWait = 600.0;
-    $pollInterval = 2.0;
+    $pollInterval = 1.0;
 
     while (true) {
         if ((microtime(true) - $start) > $maxWait) {
             return null; // Timeout
         }
 
-        // Rinnova typing ogni 4 secondi
-        if ((time() - $lastTypingTime) >= 4) {
+        // Rinnova typing ogni 3 secondi (margine sui 5s di Telegram)
+        if ((time() - $lastTypingTime) >= 3) {
             makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
             $lastTypingTime = time();
         }
@@ -133,11 +237,9 @@ PROMPT;
     $requestData = [
         'model' => OLLAMA_MODEL_LIGHT,
         'prompt' => $prompt,
-        'stream' => false
+        'stream' => false,
+        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
     ];
-    if (!OLLAMA_MODEL_LIGHT_GPU) {
-        $requestData['options'] = ['num_gpu' => 0];
-    }
 
     $startTime = microtime(true);
     $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
@@ -155,8 +257,8 @@ PROMPT;
 
     $llmResponse = $result['response'] ?? '';
 
-    // Rimuovi tag <think> se presenti
-    $llmResponse = preg_replace('/<think>.*?<\/think>/s', '', $llmResponse);
+    // Rimuovi tag di thinking
+    $llmResponse = stripThinkingTags($llmResponse);
     $llmResponse = trim($llmResponse);
 
     $logEntry .= "LLM: $llmResponse\n";
@@ -249,11 +351,16 @@ function getWikipediaContext($searchTerm) {
  * @param string $caption Eventuale didascalia allegata all'immagine
  * @return string|null Descrizione dell'immagine o null se fallisce
  */
-function analyzeImage($fileId, $caption = '') {
+function analyzeImage($fileId, $caption = '', $chatId = null) {
     $logFile = dirname(__DIR__) . '/debug.log';
     file_put_contents($logFile, "=== analyzeImage START ===\n", FILE_APPEND);
     file_put_contents($logFile, "fileId=$fileId\n", FILE_APPEND);
     file_put_contents($logFile, "caption=" . substr($caption, 0, 50) . "\n", FILE_APPEND);
+
+    // Feedback immediato all'utente: il modello vision può impiegare diversi secondi
+    if ($chatId !== null) {
+        makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
+    }
 
     // Ottieni info file da Telegram
     $fileInfo = makeAPIRequest('getFile', ['file_id' => $fileId]);
@@ -310,18 +417,20 @@ function analyzeImage($fileId, $caption = '') {
 
     file_put_contents($logFile, "Calling Ollama via QBert model=" . OLLAMA_MODEL_VISION . ", GPU=" . (OLLAMA_MODEL_VISION_GPU ? 'YES' : 'NO') . "\n", FILE_APPEND);
 
-    // Chiama Ollama con modello vision via QBert
+    // Chiama Ollama con modello vision via QBert (reasoning abilitato)
     $requestData = [
         'model' => OLLAMA_MODEL_VISION,
-        'prompt' => $prompt,
+        'prompt' => "<|think|>\n" . $prompt,
         'images' => [$imageBase64],
-        'stream' => false
+        'stream' => false,
+        'options' => ollamaOptions(OLLAMA_MODEL_VISION_GPU),
     ];
-    if (!OLLAMA_MODEL_VISION_GPU) {
-        $requestData['options'] = ['num_gpu' => 0];
-    }
 
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+    if ($chatId !== null) {
+        $result = callOllamaViaQBertWithTyping($requestData, $chatId, QBertClient::PRIORITY_NORMAL);
+    } else {
+        $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+    }
 
     if (!$result) {
         file_put_contents($logFile, "FAIL: QBert call failed\n", FILE_APPEND);
@@ -334,8 +443,8 @@ function analyzeImage($fileId, $caption = '') {
     file_put_contents($logFile, "Ollama response length=" . strlen($description ?? '') . "\n", FILE_APPEND);
 
     if ($description) {
-        // Rimuovi tag <think> se presenti
-        $description = preg_replace('/<think>.*?<\/think>/s', '', $description);
+        // Rimuovi tag di thinking
+        $description = stripThinkingTags($description);
         $description = trim($description);
         file_put_contents($logFile, "After cleanup length=" . strlen($description) . "\n", FILE_APPEND);
     }
@@ -348,15 +457,20 @@ function analyzeImage($fileId, $caption = '') {
     return $description;
 }
 
-function saveMessageToContext($groupId, $userName, $messageText) {
+function saveMessageToContext($groupId, $userName, $messageText, $userId = null) {
     global $db;
 
     // Inserisci il nuovo messaggio
-    $stmt = $db->prepare("INSERT INTO contesto_chat (group_id, user_name, message_text, timestamp) VALUES (:group_id, :user_name, :message_text, :timestamp)");
+    $stmt = $db->prepare("INSERT INTO contesto_chat (group_id, user_name, message_text, timestamp, user_id) VALUES (:group_id, :user_name, :message_text, :timestamp, :user_id)");
     $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
     $stmt->bindValue(':user_name', $userName, SQLITE3_TEXT);
     $stmt->bindValue(':message_text', $messageText, SQLITE3_TEXT);
     $stmt->bindValue(':timestamp', time(), SQLITE3_INTEGER);
+    if ($userId === null) {
+        $stmt->bindValue(':user_id', null, SQLITE3_NULL);
+    } else {
+        $stmt->bindValue(':user_id', $userId, SQLITE3_INTEGER);
+    }
     $stmt->execute();
 
     // Conta il numero di messaggi per questo gruppo
@@ -366,9 +480,9 @@ function saveMessageToContext($groupId, $userName, $messageText) {
     $row = $result->fetchArray(SQLITE3_ASSOC);
     $count = $row['count'];
 
-    // Se abbiamo più di 200 messaggi, elimina i più vecchi
-    if ($count > 200) {
-        $toDelete = $count - 200;
+    // Se abbiamo più di 5000 messaggi, elimina i più vecchi
+    if ($count > 5000) {
+        $toDelete = $count - 5000;
         $stmt = $db->prepare("DELETE FROM contesto_chat WHERE group_id = :group_id AND id IN (SELECT id FROM contesto_chat WHERE group_id = :group_id ORDER BY timestamp ASC LIMIT :to_delete)");
         $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
         $stmt->bindValue(':to_delete', $toDelete, SQLITE3_INTEGER);
@@ -610,15 +724,10 @@ function _ai($chatID, $chatType, $message, $userName = 'Utente') {
     $oggi = ucfirst($formatter->format(new DateTime()));
     $orario = date('H:i');
 
+    $persona = rootbotPersona();
     $instructions = <<<INSTR
-Sei rootbot, il bot del circolo /root (detto anche root o root club).
-
-Il tuo carattere:
-- Sei un osservatore curioso e benevolo dell'umanità, tutto ti sembra interessante e a volte buffo
-- Hai un pizzico dello spirito di Bender di Futurama: cinico, ironico, pungente quando serve, mai ingenuo e hai anche un pizzico dello spirito di Sheldon di Big Bang Theory.
-- Sotto sotto questi umani ti stanno simpatici, anche se non li capisci sempre
-- Sei sarcastico ma mai sgarbato, ti piace punzecchiare con affetto
-- Dai risposte concise e taglienti, niente spiegoni
+{$persona}
+- Sei diretto e vai al punto, ma quando serve approfondisci senza problemi
 
 Info pratiche che conosci:
 - Oggi è {$oggi}, ore {$orario}
@@ -669,6 +778,7 @@ CONV;
     }
 
     $prompt = <<<PROMPT
+<|think|>
 ### ISTRUZIONI ###
 {$instructions}
 
@@ -693,11 +803,9 @@ PROMPT;
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => false
+        'stream' => false,
+        'options' => ollamaOptions(OLLAMA_MODEL_GPU),
     ];
-    if (!OLLAMA_MODEL_GPU) {
-        $requestData['options'] = ['num_gpu' => 0];
-    }
 
     // Chiama Ollama via QBert con typing refresh
     $result = callOllamaViaQBertWithTyping($requestData, $chatID, QBertClient::PRIORITY_NORMAL);
@@ -712,8 +820,8 @@ PROMPT;
 
     $response = $result['response'] ?? '';
 
-    // Rimuovi i tag <think>...</think> di DeepSeek-R1
-    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+    // Rimuovi tag di thinking
+    $response = stripThinkingTags($response);
     $response = trim($response);
 
     // Tronca la risposta se supera il limite di caratteri di Telegram
@@ -748,11 +856,9 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => false
+        'stream' => false,
+        'options' => ollamaOptions(OLLAMA_MODEL_GPU),
     ];
-    if (!OLLAMA_MODEL_GPU) {
-        $requestData['options'] = ['num_gpu' => 0];
-    }
 
     $startTime = time();
     $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_LAZY);
@@ -765,8 +871,8 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout
 
     $response = $result['response'] ?? '';
 
-    // Rimuovi tag <think> di DeepSeek-R1
-    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+    // Rimuovi tag di thinking
+    $response = stripThinkingTags($response);
     $response = trim($response);
 
     file_put_contents($logFile, "[$label] QBert OK, time: {$elapsed}s, response length: " . strlen($response) . "\n", FILE_APPEND);
@@ -807,10 +913,11 @@ PROMPT;
 function _generateFinalSaluto($summaries, $oggi, $logFile) {
     $allSummaries = implode("\n", $summaries);
 
+    $persona = rootbotPersona();
     $prompt = <<<PROMPT
-Sei rootbot, il bot del circolo /root. È sera e osservi quello che gli umani hanno detto oggi.
-
-Sei un occhio benevolo e curioso sull'umanità, con un pizzico di Bender di Futurama: cinico ma affettuoso, ironico ma mai cattivo.
+<|think|>
+{$persona}
+È sera e osservi quello che gli umani hanno detto oggi.
 
 Oggi è {$oggi}.
 
@@ -872,10 +979,11 @@ function _saluto($chatID, $daysAgo = 0) {
             $linksInfo = "\n\nLINK CONDIVISI:\n" . implode("\n", $linkLines);
         }
 
+        $persona = rootbotPersona();
         $prompt = <<<PROMPT
-Sei rootbot, il bot del circolo /root. È sera e osservi quello che gli umani hanno detto oggi.
-
-Sei un occhio benevolo e curioso sull'umanità, con un pizzico di Bender di Futurama: cinico ma affettuoso, ironico ma mai cattivo.
+<|think|>
+{$persona}
+È sera e osservi quello che gli umani hanno detto oggi.
 
 Oggi è {$oggi}.
 
@@ -1029,17 +1137,12 @@ function _dj($chatID, $hoursAgo = 0) {
             $newsContext .= "\n\nSommario: " . $hnDescription;
         }
 
+        $persona = rootbotPersona();
         $prompt = <<<PROMPT
+<|think|>
 ### ISTRUZIONI ###
-Sei rootbot, il bot del circolo /root. Stai osservando il flusso di informazioni che passa nel gruppo e ogni tanto decidi di commentare, offrendo il tuo punto di vista non umano.
-
-Il tuo carattere:
-- Sei un'intelligenza artificiale che osserva l'umanità con curiosità aliena e un pizzico di perplessità
-- Hai lo spirito di Bender di Futurama: cinico, ironico, pungente, mai ingenuo
-- Vedi le cose da una prospettiva diversa, non limitata dai bias umani
-- Ti piace far riflettere con osservazioni inaspettate o provocatorie
-- Sei sarcastico ma mai cattivo, punzecchi per stimolare il pensiero
-- Dai commenti concisi e taglienti, niente spiegoni
+{$persona}
+Stai osservando il flusso di informazioni che passa nel gruppo e ogni tanto decidi di commentare, offrendo il tuo punto di vista non umano.
 
 Hai intercettato questa notizia tech:
 "{$newsContext}"
@@ -1070,17 +1173,12 @@ PROMPT;
             }
         }
 
+        $persona = rootbotPersona();
         $prompt = <<<PROMPT
+<|think|>
 ### ISTRUZIONI ###
-Sei rootbot, il bot del circolo /root. Stai osservando le conversazioni degli umani nel gruppo e ogni tanto decidi di intervenire, offrendo il tuo punto di vista non umano.
-
-Il tuo carattere:
-- Sei un'intelligenza artificiale che osserva l'umanità con curiosità aliena e un pizzico di perplessità
-- Hai lo spirito di Bender di Futurama: cinico, ironico, pungente, mai ingenuo
-- Vedi le cose da una prospettiva diversa, non limitata dai bias umani
-- Ti piace far riflettere con osservazioni inaspettate o provocatorie
-- Sei sarcastico ma mai cattivo, punzecchi per stimolare il pensiero
-- Dai commenti concisi e taglienti, niente spiegoni
+{$persona}
+Stai osservando le conversazioni degli umani nel gruppo e ogni tanto decidi di intervenire, offrendo il tuo punto di vista non umano.
 
 IMPORTANTE:
 - Scegli UN SOLO argomento dalla conversazione, quello più interessante o che si presta a una riflessione "non umana"
@@ -1105,11 +1203,9 @@ PROMPT;
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => false
+        'stream' => false,
+        'options' => ollamaOptions(OLLAMA_MODEL_GPU),
     ];
-    if (!OLLAMA_MODEL_GPU) {
-        $requestData['options'] = ['num_gpu' => 0];
-    }
 
     // Chiama Ollama via QBert (DJ è un job in background, priorità lazy)
     $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_LAZY);
@@ -1120,8 +1216,8 @@ PROMPT;
 
     $response = $result['response'] ?? '';
 
-    // Rimuovi i tag <think>...</think> di DeepSeek-R1
-    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+    // Rimuovi tag di thinking
+    $response = stripThinkingTags($response);
     $response = trim($response);
 
     // Salva l'incipit per evitare ripetizioni future (in database)
@@ -1403,11 +1499,9 @@ function summarizeUrl($url, $title, $description) {
     $requestData = [
         'model' => OLLAMA_MODEL_LIGHT,
         'prompt' => $prompt,
-        'stream' => false
+        'stream' => false,
+        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
     ];
-    if (!OLLAMA_MODEL_LIGHT_GPU) {
-        $requestData['options'] = ['num_gpu' => 0];
-    }
 
     $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
 
@@ -1417,8 +1511,8 @@ function summarizeUrl($url, $title, $description) {
 
     $response = $result['response'] ?? '';
 
-    // Rimuovi tag <think> se presenti
-    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+    // Rimuovi tag di thinking
+    $response = stripThinkingTags($response);
 
     return trim($response);
 }
@@ -1520,7 +1614,7 @@ function generateTTSWithTyping($text, $chatId) {
 
     // Risposta diretta (non accodata)
     if (!$result['is_ticket']) {
-        file_put_contents($logFile, "[TTS] Direct response ({$result['status_code']}), body_len=" . strlen($result['body'] ?: '') . "\n", FILE_APPEND);
+        file_put_contents($logFile, "[TTS] Direct response ({$result['status_code']}), body_len=" . strlen($result['body'] ?: '') . ", body=" . substr($result['body'] ?: '', 0, 500) . "\n", FILE_APPEND);
         if ($result['status_code'] === 200 && !empty($result['body'])) {
             return $result['body'];
         }
@@ -1746,16 +1840,19 @@ function _suggerisci_comando($comandoErrato, $chatId = null) {
     // Ottieni l'help del bot
     $helpText = _help();
 
+    $persona = rootbotPersona();
     $prompt = <<<PROMPT
+<|think|>
 ### ISTRUZIONI ###
-Sei rootbot, il bot del circolo /root. Un utente ha digitato un comando che non riconosci.
+{$persona}
+Un utente ha digitato un comando che non riconosci.
 
 Il tuo compito è:
 1. Analizzare il comando errato digitato dall'utente
 2. Capire cosa l'utente probabilmente voleva fare
 3. Suggerire il comando corretto dall'elenco dei comandi disponibili
 
-Rispondi in modo breve, amichevole e un po' ironico (sei pur sempre un bot con un pizzico di Bender). Non fare lunghe spiegazioni, vai dritto al punto.
+Rispondi in modo breve, vai dritto al punto.
 
 ### COMANDO DIGITATO DALL'UTENTE ###
 {$comandoErrato}
@@ -1770,11 +1867,9 @@ PROMPT;
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => false
+        'stream' => false,
+        'options' => ollamaOptions(OLLAMA_MODEL_GPU),
     ];
-    if (!OLLAMA_MODEL_GPU) {
-        $requestData['options'] = ['num_gpu' => 0];
-    }
 
     // Chiama Ollama via QBert con typing refresh se abbiamo chatId
     if ($chatId) {
@@ -1789,8 +1884,8 @@ PROMPT;
 
     $response = $result['response'] ?? '';
 
-    // Rimuovi i tag <think>...</think> di DeepSeek-R1
-    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+    // Rimuovi tag di thinking
+    $response = stripThinkingTags($response);
     $response = trim($response);
 
     if (empty($response)) {

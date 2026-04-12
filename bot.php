@@ -49,6 +49,7 @@ if (isset($update['message'])) {
     $message = $update['message'];
     $groupId = $message['chat']['id'];
     $userName = $message['from']['first_name'] ?? 'Utente';
+    $userId = $message['from']['id'] ?? null;
     $chatType = $message['chat']['type'];
 
     // Gestisci testo
@@ -67,7 +68,7 @@ if (isset($update['message'])) {
         $caption = $message['caption'] ?? '';
 
         // Analizza l'immagine con AI vision (passa anche la caption per contesto)
-        $imageDescription = analyzeImage($fileId, $caption);
+        $imageDescription = analyzeImage($fileId, $caption, $groupId);
 
         // Messaggio utente: ha condiviso un'immagine (+ eventuale caption)
         if ($caption) {
@@ -112,7 +113,7 @@ if (isset($update['message'])) {
         $caption = $message['caption'] ?? '';
         file_put_contents('debug.log', "Processing document image, caption=" . substr($caption, 0, 50) . "\n", FILE_APPEND);
 
-        $imageDescription = analyzeImage($fileId, $caption);
+        $imageDescription = analyzeImage($fileId, $caption, $groupId);
         file_put_contents('debug.log', "analyzeImage returned: " . ($imageDescription ? "OK (" . strlen($imageDescription) . " chars)" : "NULL") . "\n", FILE_APPEND);
 
         // Messaggio utente: ha condiviso un'immagine (+ eventuale caption)
@@ -147,7 +148,7 @@ if (isset($update['message'])) {
 
     // Salva nel contesto PRIMA di processMessage (così l'AI ha il contesto aggiornato)
     if (!empty(trim($messageText))) {
-        saveMessageToContext($groupId, $userName, $messageText);
+        saveMessageToContext($groupId, $userName, $messageText, $userId);
     }
     // Salva l'analisi immagine come messaggio separato del bot
     if (!empty($botImageAnalysis)) {
@@ -167,6 +168,41 @@ if (isset($update['message'])) {
 
     if ($mentionsBot) {
         markAsReplied($groupId, $message['message_id']);
+    }
+
+    // Se l'utente fa reply a un'immagine inviata in precedenza con una domanda
+    // rivolta al bot, rilanciamo l'analisi vision usando la domanda come prompt
+    // (invece di affidarci all'analisi generica già salvata nel contesto).
+    if ($mentionsBot
+        && !isset($message['photo'])
+        && !(isset($message['document']) && isImageDocument($message['document']))
+        && isset($message['reply_to_message'])) {
+
+        $replyTo = $message['reply_to_message'];
+        $replyFileId = null;
+        if (isset($replyTo['photo'])) {
+            $replyPhotos = $replyTo['photo'];
+            $replyFileId = $replyPhotos[count($replyPhotos) - 1]['file_id'];
+        } elseif (isset($replyTo['document']) && isImageDocument($replyTo['document'])) {
+            $replyFileId = $replyTo['document']['file_id'];
+        }
+
+        if ($replyFileId !== null && !empty(trim($messageText))) {
+            file_put_contents('debug.log', "=== REPLY TO IMAGE: rilancio vision con domanda ===\n", FILE_APPEND);
+            $question = trim($messageText);
+            $imageAnswer = analyzeImage($replyFileId, $question, $groupId);
+
+            if ($imageAnswer) {
+                makeAPIRequest('sendMessage', [
+                    'chat_id' => $groupId,
+                    'text' => $imageAnswer,
+                    'reply_to_message_id' => $message['message_id']
+                ]);
+                saveMessageToContext($groupId, 'rootbot', "[risposta su immagine: $imageAnswer]");
+            }
+
+            return;
+        }
     }
 
     // POI: Processa il messaggio (comandi, AI, ecc.)
@@ -193,13 +229,14 @@ if (isset($update['message'])) {
         if (markAsReplied($chatId, $messageId)) {
             // Salva nel contesto e processa come un messaggio normale
             $userName = $editedMessage['from']['first_name'] ?? 'Utente';
+            $userId = $editedMessage['from']['id'] ?? null;
             $messageText = str_replace('@rootbotbot', '', $text);
             $messageText = str_replace('@rootbot', '', $messageText);
             $messageText = str_replace('@bot', '', $messageText);
             $messageText = str_replace('@root', '', $messageText);
 
             if (!empty(trim($messageText))) {
-                saveMessageToContext($chatId, $userName, $messageText);
+                saveMessageToContext($chatId, $userName, $messageText, $userId);
             }
 
             processMessage($editedMessage);

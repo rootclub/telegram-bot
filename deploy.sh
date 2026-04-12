@@ -44,6 +44,9 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
+# File protetti: non vengono mai caricati (contengono credenziali o dati locali)
+PROTECTED_FILES=("config.php" ".deploy-config" "deploy.sh" "telegram_bot.sqlite" "debug.log" "result.json")
+
 # Costruisci lista file
 FILES=()
 if [[ "$1" == "--all" ]]; then
@@ -56,9 +59,21 @@ if [[ "$1" == "--all" ]]; then
         ! -name '*.sqlite' \
         ! -name 'debug.log' \
         ! -name 'config.php' \
+        ! -name 'result.json' \
         -print0)
 else
     for f in "$@"; do
+        basename=$(basename "$f")
+        skip=false
+        for p in "${PROTECTED_FILES[@]}"; do
+            if [[ "$basename" == "$p" ]]; then
+                echo "BLOCCATO: '$f' è un file protetto, salto."
+                skip=true
+                break
+            fi
+        done
+        $skip && continue
+
         if [[ -f "$SCRIPT_DIR/$f" ]]; then
             FILES+=("$SCRIPT_DIR/$f")
         elif [[ -f "$f" ]]; then

@@ -278,10 +278,7 @@ PROMPT;
         'model' => OLLAMA_MODEL_LIGHT,
         'prompt' => $prompt,
         'stream' => false,
-        'options' => [
-            'num_gpu' => 0,
-            'temperature' => 0.1
-        ]
+        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['temperature' => 0.1]),
     ];
 
     $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
@@ -293,8 +290,7 @@ PROMPT;
 
     $answer = strtoupper(trim($result['response'] ?? ''));
 
-    // Rimuovi tag <think> se presenti
-    $answer = preg_replace('/<think>.*?<\/think>/s', '', $answer);
+    $answer = stripThinkingTags($answer);
     $answer = strtoupper(trim($answer));
 
     error_log("isHardwareOffer: '$text' -> '$answer'");
@@ -307,6 +303,7 @@ PROMPT;
  */
 function generateHardwareWarning($userName, $text) {
     $prompt = <<<PROMPT
+<|think|>
 Sei rootbot, il bot del circolo /root. Hai un carattere cinico e ironico come Bender di Futurama, ma sotto sotto ti stanno simpatici questi umani.
 
 Un utente ({$userName}) ha scritto questo messaggio nel gruppo:
@@ -329,10 +326,7 @@ PROMPT;
         'model' => OLLAMA_MODEL,
         'prompt' => $prompt,
         'stream' => false,
-        'options' => [
-            'num_gpu' => 0,
-            'temperature' => 0.8
-        ]
+        'options' => ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.8]),
     ];
 
     $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
@@ -345,8 +339,7 @@ PROMPT;
 
     $answer = trim($result['response'] ?? '');
 
-    // Rimuovi tag <think> se presenti
-    $answer = preg_replace('/<think>.*?<\/think>/s', '', $answer);
+    $answer = stripThinkingTags($answer);
     $answer = trim($answer);
 
     error_log("generateHardwareWarning: generated message for '$text'");

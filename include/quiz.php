@@ -21,15 +21,25 @@ function callOllamaQuiz($prompt, $model, $useGpu, $logFile, $label = 'quiz', $ti
     file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- $label (model: $model, $gpuLabel) ---\n", FILE_APPEND);
     file_put_contents($logFile, "PROMPT:\n$prompt\n", FILE_APPEND);
 
+    // Abilita reasoning per il modello principale (26b)
+    if ($model === OLLAMA_QUIZ_GENERATOR) {
+        $prompt = "<|think|>\n" . $prompt;
+    }
+
     $requestData = [
         'model' => $model,
         'prompt' => $prompt,
-        'stream' => false
+        'stream' => false,
+        'options' => [
+            'temperature' => OLLAMA_TEMPERATURE,
+            'top_p' => OLLAMA_TOP_P,
+            'top_k' => OLLAMA_TOP_K,
+        ]
     ];
 
     // Imposta GPU o CPU
     if (!$useGpu) {
-        $requestData['options'] = ['num_gpu' => 0];
+        $requestData['options']['num_gpu'] = 0;
     }
 
     $startTime = time();
@@ -45,8 +55,7 @@ function callOllamaQuiz($prompt, $model, $useGpu, $logFile, $label = 'quiz', $ti
 
     $response = $result['response'] ?? '';
 
-    // Rimuovi tag <think> di DeepSeek-R1
-    $response = preg_replace('/<think>.*?<\/think>/s', '', $response);
+    $response = stripThinkingTags($response);
     $response = trim($response);
 
     file_put_contents($logFile, "RESPONSE:\n$response\n", FILE_APPEND);

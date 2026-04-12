@@ -61,6 +61,47 @@ function initDatabase() {
         message_text TEXT,
         timestamp INTEGER
     )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_contesto_group_time ON contesto_chat(group_id, timestamp)");
+
+    // Migrazione idempotente: aggiungi user_id a contesto_chat se manca
+    $hasUserId = false;
+    $cols = $db->query("PRAGMA table_info(contesto_chat)");
+    while ($col = $cols->fetchArray(SQLITE3_ASSOC)) {
+        if ($col['name'] === 'user_id') { $hasUserId = true; break; }
+    }
+    if (!$hasUserId) {
+        $db->exec("ALTER TABLE contesto_chat ADD COLUMN user_id INTEGER");
+    }
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_contesto_user_time ON contesto_chat(user_id, timestamp)");
+
+    // Memorie utenti: profilo testuale costruito incrementalmente dall'AI
+    // NOTA: last_processed_msg_id contiene un UNIX timestamp, non un id riga.
+    // È un cursore temporale: l'estrattore prende solo messaggi con timestamp > di questo valore.
+    // Il nome è storico, non rinominato per evitare migrazione.
+    $db->exec("CREATE TABLE IF NOT EXISTS memorie_utenti (
+        user_id INTEGER PRIMARY KEY,
+        user_name TEXT,
+        profilo TEXT,
+        message_count INTEGER DEFAULT 0,
+        last_processed_msg_id INTEGER DEFAULT 0,
+        last_updated DATETIME
+    )");
+
+    // Storico messaggi: import una tantum dall'export Telegram Desktop.
+    // Schema sostanzialmente uguale a contesto_chat ma SENZA pruning, con telegram_msg_id
+    // per garantire idempotenza degli import (INSERT OR IGNORE su UNIQUE).
+    $db->exec("CREATE TABLE IF NOT EXISTS storico_messaggi (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id INTEGER,
+        telegram_msg_id INTEGER,
+        user_id INTEGER,
+        user_name TEXT,
+        message_text TEXT,
+        timestamp INTEGER,
+        UNIQUE(group_id, telegram_msg_id)
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_storico_user_time ON storico_messaggi(user_id, timestamp)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_storico_group_time ON storico_messaggi(group_id, timestamp)");
 
     // Tabelle per gestione eventi
     $db->exec("CREATE TABLE IF NOT EXISTS eventi (

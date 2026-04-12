@@ -43,10 +43,18 @@ function recordMessage($userId, $text) {
 }
 
 function sendPrivateResponse($userId, $text, $chatId = null) {
-    $privateChat = makeAPIRequest('sendMessage', [
+    $messageParams = [
         'chat_id' => $userId,
-        'text' => $text
-    ]);
+        'text' => $text,
+    ];
+    if (TTS_ENABLED) {
+        $messageParams['reply_markup'] = json_encode([
+            'inline_keyboard' => [[
+                ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
+            ]]
+        ]);
+    }
+    $privateChat = makeAPIRequest('sendMessage', $messageParams);
 
     if (!$privateChat || !$privateChat['ok']) {
         // Log dell'errore per debug
@@ -300,6 +308,7 @@ function processMessage($message) {
     } elseif (preg_match('/@rootbotbot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/\brootbotbot\b/i', $text) || preg_match('/\brootbot\b/i', $text) || $isReplyToBot || ($chatType == 'private' && !empty($text) && !preg_match('/^\//', $text))) {
         // In chat privata risponde sempre (tranne comandi), in gruppo solo se menzionato
         $aiResponse = _ai($chatID, $chatType, $text, $firstName);
+        file_put_contents(dirname(__DIR__) . '/debug.log', "[AI RETURN] len=" . strlen($aiResponse) . " response=" . substr($aiResponse, 0, 100) . "\n", FILE_APPEND);
 
         // Invia con pulsante "Ascolta" inline (se TTS abilitato)
         $messageParams = [
@@ -320,12 +329,22 @@ function processMessage($message) {
         }
 
         $result = makeAPIRequest('sendMessage', $messageParams);
+        file_put_contents(dirname(__DIR__) . '/debug.log', "[AI SEND] result=" . json_encode($result) . "\n", FILE_APPEND);
 
-        // Se il reply fallisce, riprova senza reply
+        // Se il send fallisce, gestisci i vari casi di errore 400
         if (!$result || !$result['ok']) {
-            if (isset($result['error_code']) && $result['error_code'] == 400 &&
-                strpos($result['description'], 'message to be replied not found') !== false) {
+            $errCode = $result['error_code'] ?? 0;
+            $errDesc = $result['description'] ?? '';
+
+            if ($errCode == 400 && strpos($errDesc, 'message to be replied not found') !== false) {
+                // Il messaggio a cui rispondere non esiste più, riprova senza reply
                 unset($messageParams['reply_to_message_id']);
+                $result = makeAPIRequest('sendMessage', $messageParams);
+            }
+
+            // Se ancora fallisce (es. HTML malformato nella risposta), riprova senza parse_mode
+            if (!$result || !$result['ok']) {
+                unset($messageParams['parse_mode']);
                 makeAPIRequest('sendMessage', $messageParams);
             }
         }
@@ -404,6 +423,13 @@ function processMessage($message) {
             'text' => $response,
             'parse_mode' => 'HTML'
         ];
+        if (TTS_ENABLED) {
+            $messageParams['reply_markup'] = json_encode([
+                'inline_keyboard' => [[
+                    ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
+                ]]
+            ]);
+        }
         if ($chatType !== 'private') {
             $messageParams['reply_to_message_id'] = $message['message_id'];
         }
@@ -414,11 +440,15 @@ function processMessage($message) {
         if (!$result || !$result['ok']) {
             if (isset($result['error_code']) && $result['error_code'] == 400 &&
                 strpos($result['description'], 'message to be replied not found') !== false) {
-                makeAPIRequest('sendMessage', [
+                $retryParams = [
                     'chat_id' => $chatID,
                     'text' => $response,
                     'parse_mode' => 'HTML'
-                ]);
+                ];
+                if (TTS_ENABLED) {
+                    $retryParams['reply_markup'] = $messageParams['reply_markup'];
+                }
+                makeAPIRequest('sendMessage', $retryParams);
             }
         }
     }
