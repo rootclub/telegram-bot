@@ -171,6 +171,17 @@ function initDatabase() {
     $fiveMinutesAgo = time() - 300;
     $db->exec("DELETE FROM message_dedup WHERE timestamp < $fiveMinutesAgo");
 
+    // Rate limit generazione immagini
+    $db->exec("CREATE TABLE IF NOT EXISTS image_gen_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_image_gen_user ON image_gen_usage(user_id, timestamp)");
+    // Pulizia automatica: rimuovi record più vecchi di 1 ora
+    $oneHourAgo = time() - 3600;
+    $db->exec("DELETE FROM image_gen_usage WHERE timestamp < $oneHourAgo");
+
     // Migration: aggiungi colonne se non esistono
     // Per user_states - aggiungi user_id e created_at
     $result = $db->query("PRAGMA table_info(user_states)");
@@ -318,6 +329,21 @@ function initDatabase() {
     $oneDayAgo = time() - (24 * 3600);
     $db->exec("DELETE FROM bot_replied WHERE replied_at < $oneDayAgo");
 
+    // Log immagini: salva file_id per ri-analisi su richiesta
+    $db->exec("CREATE TABLE IF NOT EXISTS image_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id INTEGER,
+        user_id INTEGER,
+        user_name TEXT,
+        file_id TEXT NOT NULL,
+        description TEXT,
+        timestamp INTEGER
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_image_log_group ON image_log(group_id, timestamp)");
+    // Pulizia automatica: rimuovi immagini più vecchie di 30 giorni
+    $monthAgo = time() - (30 * 24 * 3600);
+    $db->exec("DELETE FROM image_log WHERE timestamp < $monthAgo");
+
     // Popola topic iniziali se tabella vuota
     $result = $db->query("SELECT COUNT(*) as count FROM quiz_topics");
     $row = $result->fetchArray(SQLITE3_ASSOC);
@@ -380,5 +406,42 @@ function markAsReplied($chatId, $messageId) {
     $stmt->execute();
 
     return ($db->changes() > 0);
+}
+
+/**
+ * Salva un'immagine nel log per ri-analisi futura
+ */
+function saveImageLog($groupId, $userId, $userName, $fileId, $description) {
+    global $db;
+    $stmt = $db->prepare("INSERT INTO image_log (group_id, user_id, user_name, file_id, description, timestamp)
+                          VALUES (:group_id, :user_id, :user_name, :file_id, :description, :timestamp)");
+    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
+    $stmt->bindValue(':user_id', $userId, SQLITE3_INTEGER);
+    $stmt->bindValue(':user_name', $userName, SQLITE3_TEXT);
+    $stmt->bindValue(':file_id', $fileId, SQLITE3_TEXT);
+    $stmt->bindValue(':description', $description, SQLITE3_TEXT);
+    $stmt->bindValue(':timestamp', time(), SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
+/**
+ * Recupera le ultime N immagini di un gruppo
+ * @return array Lista di ['file_id', 'description', 'user_name', 'timestamp']
+ */
+function getRecentImages($groupId, $limit = 10) {
+    global $db;
+    $stmt = $db->prepare("SELECT file_id, description, user_name, timestamp
+                          FROM image_log
+                          WHERE group_id = :group_id
+                          ORDER BY timestamp DESC
+                          LIMIT " . intval($limit));
+    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+
+    $images = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $images[] = $row;
+    }
+    return $images;
 }
 ?>

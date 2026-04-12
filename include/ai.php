@@ -706,7 +706,18 @@ function dumpChatContext($groupId) {
     error_log($debug_info);
 }
 
-function _ai($chatID, $chatType, $message, $userName = 'Utente') {
+/**
+ * Funzione core per generare risposta AI.
+ * Chiamata dal dispatcher con eventuale sezione wiki gia' preparata dall'agente enrichment.
+ *
+ * @param int    $chatID     Chat ID Telegram
+ * @param string $chatType   Tipo chat (private, group, supergroup)
+ * @param string $message    Testo del messaggio utente
+ * @param string $userName   Nome dell'utente
+ * @param string $wikiSection Sezione wiki opzionale (da agente enrichment)
+ * @return string Risposta generata
+ */
+function _ai_core($chatID, $chatType, $message, $userName = 'Utente', $wikiSection = '') {
     $model = OLLAMA_MODEL;
 
     // Mostra "sta scrivendo..." mentre l'LLM elabora
@@ -743,29 +754,6 @@ INSTR;
     $message = str_replace('@bot', '', $message);
     $message = str_replace('@root', '', $message);
     $message = trim($message);
-
-    // Classifica se serve ricerca Wikipedia
-    $wikiSection = '';
-    $wikiStatusMessageId = null;
-    $wikiClassification = classifyForWikipedia($message);
-    if ($wikiClassification['needs_wiki'] && !empty($wikiClassification['search_term'])) {
-        // Invia messaggio di stato
-        $searchTerm = $wikiClassification['search_term'];
-        $statusResult = makeAPIRequest('sendMessage', [
-            'chat_id' => $chatID,
-            'text' => "Sto cercando informazioni su {$searchTerm}..."
-        ]);
-        if ($statusResult && $statusResult['ok']) {
-            $wikiStatusMessageId = $statusResult['result']['message_id'];
-        }
-
-        $wikiContext = getWikipediaContext($searchTerm);
-        if ($wikiContext) {
-            $wikiSection = "\n\n{$wikiContext}\n\nUSA QUESTE INFORMAZIONI per rispondere in modo accurato, ma mantieni il tuo stile e non citare Wikipedia esplicitamente.";
-        } else {
-            $wikiSection = "\n\n### NOTA ###\nHo cercato informazioni su \"{$searchTerm}\" ma non ho trovato nulla di rilevante. Rispondi onestamente che non hai informazioni su questo argomento.";
-        }
-    }
 
     // Costruisci sezione conversazione solo se ci sono scambi precedenti
     $conversationSection = '';
@@ -811,10 +799,6 @@ PROMPT;
     $result = callOllamaViaQBertWithTyping($requestData, $chatID, QBertClient::PRIORITY_NORMAL);
 
     if (!$result) {
-        // Cancella messaggio di stato Wikipedia se presente
-        if ($wikiStatusMessageId) {
-            makeAPIRequest('deleteMessage', ['chat_id' => $chatID, 'message_id' => $wikiStatusMessageId]);
-        }
         return "Si è verificato un errore durante la comunicazione con l'AI.";
     }
 
@@ -835,13 +819,15 @@ PROMPT;
     $logEntry .= str_repeat('=', 60) . "\n";
     file_put_contents(dirname(__DIR__) . '/ai.log', $logEntry, FILE_APPEND);
 
-    // Cancella messaggio di stato Wikipedia se presente
-    if ($wikiStatusMessageId) {
-        makeAPIRequest('deleteMessage', ['chat_id' => $chatID, 'message_id' => $wikiStatusMessageId]);
-    }
-
-    saveMessageToContext($chatID, "rootbot", $response);
     return $response;
+}
+
+/**
+ * Wrapper di compatibilita': chiama _ai_core senza enrichment.
+ * Usato da contesti che non passano dal dispatcher (es. immagini).
+ */
+function _ai($chatID, $chatType, $message, $userName = 'Utente') {
+    return _ai_core($chatID, $chatType, $message, $userName);
 }
 
 /**

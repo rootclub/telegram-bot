@@ -61,11 +61,19 @@ try {
 
     // Invia al gruppo
     cron_log("Sending to Telegram...");
-    $result = makeAPIRequest('sendMessage', [
+    $messageParams = [
         'chat_id' => MAIN_GROUP_ID,
         'text' => $saluto,
         'parse_mode' => 'HTML'
-    ]);
+    ];
+    if (TTS_ENABLED) {
+        $messageParams['reply_markup'] = json_encode([
+            'inline_keyboard' => [[
+                ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
+            ]]
+        ]);
+    }
+    $result = makeAPIRequest('sendMessage', $messageParams);
 
     if ($result && $result['ok']) {
         cron_log("Message sent successfully!");

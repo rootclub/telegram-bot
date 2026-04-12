@@ -48,7 +48,13 @@ Quiz e trivia:
 /classifica_quiz - classifica dei migliori giocatori
 /aggiungi_argomento [nome]|[descrizione] - aggiunge argomento con descrizione (solo admin)
 /aggiungi_argomento [arg1], [arg2], [arg3] - aggiunge piu argomenti (solo admin)
-Puoi anche chiedere: 'rootbot fai un quiz su tecnologia'";
+Puoi anche chiedere: 'rootbot fai un quiz su tecnologia'
+
+Generazione immagini:
+/genera [descrizione] - genera un'immagine dalla descrizione (es: /genera un gatto astronauta)
+Puoi aggiungere 'landscape' o 'portrait' per il formato (default: quadrato)
+Puoi anche chiedere: 'rootbot disegna un tramonto sul mare'
+Limite: 6 immagini/ora per utente";
 }
 
 function _info($chatID, $chatType){

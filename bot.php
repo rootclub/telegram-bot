@@ -9,6 +9,7 @@ include "include/moderation.php";
 include "include/orders.php";
 include "include/events.php";
 include "include/quiz.php";
+include "include/dispatcher.php";
 include "include/message.php";
 
 $db = new SQLite3(DB_FILE);
@@ -80,6 +81,8 @@ if (isset($update['message'])) {
         if ($imageDescription) {
             // Salva l'analisi come messaggio separato del bot
             $botImageAnalysis = "[analisi immagine: $imageDescription]";
+            // Salva file_id per ri-analisi futura
+            saveImageLog($groupId, $userId, $userName, $fileId, $imageDescription);
 
             // Controlla se la caption menziona il bot
             $captionMentionsBot = !empty($caption) && (
@@ -126,6 +129,8 @@ if (isset($update['message'])) {
         if ($imageDescription) {
             // Salva l'analisi come messaggio separato del bot
             $botImageAnalysis = "[analisi immagine: $imageDescription]";
+            // Salva file_id per ri-analisi futura
+            saveImageLog($groupId, $userId, $userName, $fileId, $imageDescription);
 
             $captionMentionsBot = !empty($caption) && (
                 preg_match('/@rootbotbot\b/', $caption) ||
@@ -199,6 +204,8 @@ if (isset($update['message'])) {
                     'reply_to_message_id' => $message['message_id']
                 ]);
                 saveMessageToContext($groupId, 'rootbot', "[risposta su immagine: $imageAnswer]");
+                // Aggiorna descrizione nel log immagini
+                saveImageLog($groupId, $userId, $userName, $replyFileId, $imageAnswer);
             }
 
             return;

@@ -250,7 +250,13 @@ function processMessage($message) {
         // Se null, quiz inviato con successo, nessuna risposta testuale
 
     } elseif ($text == '/argomenti_quiz' || $text == '/argomenti_quiz@rootbotbot') {
-        $response = listQuizTopics();
+        $messages = listQuizTopics();
+        foreach ($messages as $msg) {
+            makeAPIRequest('sendMessage', [
+                'chat_id' => $chatID,
+                'text' => $msg,
+            ]);
+        }
 
     } elseif ($text == '/classifica_quiz' || $text == '/classifica_quiz@rootbotbot') {
         $response = getQuizLeaderboard($chatID);
@@ -298,56 +304,53 @@ function processMessage($message) {
             $response = "Solo gli admin possono aggiungere argomenti quiz.";
         }
 
-    // Pattern naturale quiz: "rootbot fai un quiz su X"
-    } elseif (($naturalQuizTopic = detectNaturalQuizRequest($text, $chatType == 'private')) !== null) {
-        $quizError = generateAndSendQuiz($chatID, $naturalQuizTopic, $fromId, $firstName);
-        if ($quizError !== null) {
-            $response = $quizError;
+    // /genera [descrizione] — genera immagine via ComfyUI
+    } elseif (preg_match('/^\/genera(?:@rootbotbot)?(?:\s+(.*))?$/ui', $text, $genMatches)) {
+        $genPrompt = trim($genMatches[1] ?? '');
+        if ($genPrompt === '') {
+            $response = "Uso: /genera [descrizione immagine]\nEs: /genera un gatto astronauta nello spazio";
+        } else {
+            // Estrai formato se presente in coda (es. "un gatto landscape")
+            $genFormato = 'square';
+            if (preg_match('/\b(landscape|portrait|orizzontale|verticale)\b/i', $genPrompt, $fmtMatch)) {
+                $genFormato = match (strtolower($fmtMatch[1])) {
+                    'landscape', 'orizzontale' => 'landscape',
+                    'portrait', 'verticale' => 'portrait',
+                    default => 'square',
+                };
+                $genPrompt = trim(preg_replace('/\b' . preg_quote($fmtMatch[0], '/') . '\b/i', '', $genPrompt));
+            }
+            $messageContext = [
+                'chatID' => $chatID,
+                'chatType' => $chatType,
+                'message' => $genPrompt,
+                'userName' => $firstName,
+                'fromId' => $fromId,
+                'firstName' => $firstName,
+                'messageId' => $message['message_id'],
+            ];
+            // Carica e invoca direttamente l'agente image_gen
+            $registry = loadAgentRegistry();
+            $agent = $registry['agents']['image_gen'];
+            $result = ($agent['handler'])($messageContext, ['prompt' => $genPrompt, 'formato' => $genFormato]);
+            if ($result && !empty($result['response'])) {
+                $response = $result['response'];
+            }
+            // Se handled=true, la foto è già stata inviata
         }
 
+    // Dispatcher modulare: menzione bot, reply al bot, o chat privata
     } elseif (preg_match('/@rootbotbot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/\brootbotbot\b/i', $text) || preg_match('/\brootbot\b/i', $text) || $isReplyToBot || ($chatType == 'private' && !empty($text) && !preg_match('/^\//', $text))) {
-        // In chat privata risponde sempre (tranne comandi), in gruppo solo se menzionato
-        $aiResponse = _ai($chatID, $chatType, $text, $firstName);
-        file_put_contents(dirname(__DIR__) . '/debug.log', "[AI RETURN] len=" . strlen($aiResponse) . " response=" . substr($aiResponse, 0, 100) . "\n", FILE_APPEND);
-
-        // Invia con pulsante "Ascolta" inline (se TTS abilitato)
-        $messageParams = [
-            'chat_id' => $chatID,
-            'text' => $aiResponse,
-            'parse_mode' => 'HTML',
+        $messageContext = [
+            'chatID' => $chatID,
+            'chatType' => $chatType,
+            'message' => $text,
+            'userName' => $firstName,
+            'fromId' => $fromId,
+            'firstName' => $firstName,
+            'messageId' => $message['message_id'],
         ];
-        $isAiError = ($aiResponse === "Si è verificato un errore durante la comunicazione con l'AI.");
-        if (TTS_ENABLED && !$isAiError) {
-            $messageParams['reply_markup'] = json_encode([
-                'inline_keyboard' => [[
-                    ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
-                ]]
-            ]);
-        }
-        if ($chatType !== 'private') {
-            $messageParams['reply_to_message_id'] = $message['message_id'];
-        }
-
-        $result = makeAPIRequest('sendMessage', $messageParams);
-        file_put_contents(dirname(__DIR__) . '/debug.log', "[AI SEND] result=" . json_encode($result) . "\n", FILE_APPEND);
-
-        // Se il send fallisce, gestisci i vari casi di errore 400
-        if (!$result || !$result['ok']) {
-            $errCode = $result['error_code'] ?? 0;
-            $errDesc = $result['description'] ?? '';
-
-            if ($errCode == 400 && strpos($errDesc, 'message to be replied not found') !== false) {
-                // Il messaggio a cui rispondere non esiste più, riprova senza reply
-                unset($messageParams['reply_to_message_id']);
-                $result = makeAPIRequest('sendMessage', $messageParams);
-            }
-
-            // Se ancora fallisce (es. HTML malformato nella risposta), riprova senza parse_mode
-            if (!$result || !$result['ok']) {
-                unset($messageParams['parse_mode']);
-                makeAPIRequest('sendMessage', $messageParams);
-            }
-        }
+        dispatchIntent($text, $messageContext);
         return;
 
     } elseif (preg_match('/^\/saluto(?:@rootbotbot)?(?:\s+-(\d+))?$/', $text, $salutoMatches)) {
@@ -436,19 +439,20 @@ function processMessage($message) {
 
         $result = makeAPIRequest('sendMessage', $messageParams);
 
-        // Se il reply fallisce (messaggio originale eliminato), riprova senza reply
+        // Retry: messaggio originale eliminato
         if (!$result || !$result['ok']) {
-            if (isset($result['error_code']) && $result['error_code'] == 400 &&
-                strpos($result['description'], 'message to be replied not found') !== false) {
-                $retryParams = [
-                    'chat_id' => $chatID,
-                    'text' => $response,
-                    'parse_mode' => 'HTML'
-                ];
-                if (TTS_ENABLED) {
-                    $retryParams['reply_markup'] = $messageParams['reply_markup'];
-                }
-                makeAPIRequest('sendMessage', $retryParams);
+            $errCode = $result['error_code'] ?? 0;
+            $errDesc = $result['description'] ?? '';
+
+            if ($errCode == 400 && strpos($errDesc, 'message to be replied not found') !== false) {
+                unset($messageParams['reply_to_message_id']);
+                $result = makeAPIRequest('sendMessage', $messageParams);
+            }
+
+            // Retry: HTML malformato nella risposta
+            if (!$result || !$result['ok']) {
+                unset($messageParams['parse_mode']);
+                makeAPIRequest('sendMessage', $messageParams);
             }
         }
     }

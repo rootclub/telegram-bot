@@ -783,17 +783,31 @@ function listQuizTopics() {
         return "Nessun argomento quiz configurato.";
     }
 
-    $response = "Argomenti Quiz disponibili:\n\n";
-    foreach ($topics as $t) {
-        $response .= "- " . ucfirst($t['topic']);
-        if ($t['description']) {
-            $response .= " (" . $t['description'] . ")";
-        }
-        $response .= "\n";
-    }
-    $response .= "\nUsa /quiz [argomento] per un quiz specifico, o /quiz per uno casuale.\nPuoi anche specificare argomenti liberi!";
+    $total = count($topics);
+    $header = "📚 Argomenti Quiz disponibili ({$total}):\n\n";
+    $footer = "\nUsa /quiz [argomento] per un quiz specifico, o /quiz per uno casuale.\nPuoi anche specificare argomenti liberi!";
+    $maxLen = 4000; // margine sotto il limite Telegram di 4096
 
-    return $response;
+    $messages = [];
+    $current = $header;
+
+    foreach ($topics as $t) {
+        $line = "- " . ucfirst($t['topic']);
+        if ($t['description']) {
+            $line .= " (" . $t['description'] . ")";
+        }
+        $line .= "\n";
+
+        if (mb_strlen($current) + mb_strlen($line) > $maxLen) {
+            $messages[] = $current;
+            $current = '';
+        }
+        $current .= $line;
+    }
+    $current .= $footer;
+    $messages[] = $current;
+
+    return $messages;
 }
 
 /**
