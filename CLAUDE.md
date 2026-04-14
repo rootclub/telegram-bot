@@ -134,7 +134,7 @@ The `image_gen` agent generates images via ComfyUI (z-image turbo workflow):
 
 - **`cron_saluto.php`** — Daily evening recap at 23:50, calls `_saluto()` and sends to main group with TTS button
 - **`cron_dj.php`** — Hourly spontaneous DJ commentary, Hacker News integration, configurable probability (15%), min 2h between posts, min 3 messages to trigger
-- **`cron_rassegna.php`** — Morning press digest at 08:00, fetches from rootclub.it/news/
+- **`cron_rassegna.php`** — Morning press digest at 08:00, fetches from rootclub.it/news/. Considers articles from the last 48h (buffer against skipped runs); dedup via `rassegna_posted` table (URL as PK) ensures no duplicates across days
 
 ## Database Schema
 
@@ -204,6 +204,10 @@ The `image_gen` agent generates images via ComfyUI (z-image turbo workflow):
 22. **image_gen_usage** - Rate limiting for AI image generation
     - `id`, `user_id`, `timestamp`
     - Auto-cleanup: records older than 1 hour
+
+23. **rassegna_posted** - Articles already posted by morning press digest (dedup)
+    - `url` (PK), `title`, `posted_at`
+    - Auto-cleanup: records older than 30 days
 
 ## Development Commands
 

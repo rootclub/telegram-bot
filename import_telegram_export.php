@@ -107,12 +107,25 @@ $stats = [
     'skipped_no_user' => 0,
 ];
 
+// Pre-build mappa message_id -> user_id per risolvere i reply_to
+echo "Costruzione mappa reply_to...\n";
+$msgToUser = [];
+foreach ($messages as $m) {
+    if (isset($m['id'], $m['from_id'])) {
+        $uid = extractUserId($m['from_id']);
+        if ($uid !== null) {
+            $msgToUser[(int)$m['id']] = $uid;
+        }
+    }
+}
+echo "  " . count($msgToUser) . " messaggi mappati\n\n";
+
 if (!$dryRun) {
     $db->exec("BEGIN TRANSACTION");
     $stmt = $db->prepare("
         INSERT OR IGNORE INTO storico_messaggi
-            (group_id, telegram_msg_id, user_id, user_name, message_text, timestamp)
-        VALUES (:gid, :tid, :uid, :uname, :text, :ts)
+            (group_id, telegram_msg_id, user_id, user_name, message_text, timestamp, reply_to_user_id)
+        VALUES (:gid, :tid, :uid, :uname, :text, :ts, :reply_uid)
     ");
 }
 
@@ -158,12 +171,19 @@ foreach ($messages as $m) {
         continue;
     }
 
-    $stmt->bindValue(':gid',   $groupId, SQLITE3_INTEGER);
-    $stmt->bindValue(':tid',   $tid,     SQLITE3_INTEGER);
-    $stmt->bindValue(':uid',   $userId,  SQLITE3_INTEGER);
-    $stmt->bindValue(':uname', $userName, SQLITE3_TEXT);
-    $stmt->bindValue(':text',  $text,    SQLITE3_TEXT);
-    $stmt->bindValue(':ts',    $ts,      SQLITE3_INTEGER);
+    // Risolvi reply_to_message_id -> user_id dell'autore citato
+    $replyToUserId = null;
+    if (isset($m['reply_to_message_id'])) {
+        $replyToUserId = $msgToUser[(int)$m['reply_to_message_id']] ?? null;
+    }
+
+    $stmt->bindValue(':gid',       $groupId, SQLITE3_INTEGER);
+    $stmt->bindValue(':tid',       $tid,     SQLITE3_INTEGER);
+    $stmt->bindValue(':uid',       $userId,  SQLITE3_INTEGER);
+    $stmt->bindValue(':uname',     $userName, SQLITE3_TEXT);
+    $stmt->bindValue(':text',      $text,    SQLITE3_TEXT);
+    $stmt->bindValue(':ts',        $ts,      SQLITE3_INTEGER);
+    $stmt->bindValue(':reply_uid', $replyToUserId, $replyToUserId === null ? SQLITE3_NULL : SQLITE3_INTEGER);
     $stmt->execute();
 
     if ($db->changes() > 0) {

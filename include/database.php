@@ -59,7 +59,8 @@ function initDatabase() {
         group_id INTEGER,
         user_name TEXT,
         message_text TEXT,
-        timestamp INTEGER
+        timestamp INTEGER,
+        reply_to_user_id INTEGER
     )");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_contesto_group_time ON contesto_chat(group_id, timestamp)");
 
@@ -74,6 +75,26 @@ function initDatabase() {
     }
     $db->exec("CREATE INDEX IF NOT EXISTS idx_contesto_user_time ON contesto_chat(user_id, timestamp)");
 
+    // Migrazione: reply_to_user_id su contesto_chat e storico_messaggi
+    $cols = $db->query("PRAGMA table_info(contesto_chat)");
+    $hasReply = false;
+    while ($col = $cols->fetchArray(SQLITE3_ASSOC)) {
+        if ($col['name'] === 'reply_to_user_id') { $hasReply = true; break; }
+    }
+    if (!$hasReply) {
+        $db->exec("ALTER TABLE contesto_chat ADD COLUMN reply_to_user_id INTEGER");
+    }
+
+    $cols = $db->query("PRAGMA table_info(storico_messaggi)");
+    $hasReply = false;
+    while ($col = $cols->fetchArray(SQLITE3_ASSOC)) {
+        if ($col['name'] === 'reply_to_user_id') { $hasReply = true; break; }
+    }
+    if (!$hasReply) {
+        $db->exec("ALTER TABLE storico_messaggi ADD COLUMN reply_to_user_id INTEGER");
+    }
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_storico_reply_to ON storico_messaggi(reply_to_user_id)");
+
     // Memorie utenti: profilo testuale costruito incrementalmente dall'AI
     // NOTA: last_processed_msg_id contiene un UNIX timestamp, non un id riga.
     // È un cursore temporale: l'estrattore prende solo messaggi con timestamp > di questo valore.
@@ -82,10 +103,33 @@ function initDatabase() {
         user_id INTEGER PRIMARY KEY,
         user_name TEXT,
         profilo TEXT,
+        bot_prompt TEXT,
+        nickname TEXT,
         message_count INTEGER DEFAULT 0,
         last_processed_msg_id INTEGER DEFAULT 0,
+        last_processed_bot_id INTEGER DEFAULT 0,
+        last_processed_nick_id INTEGER DEFAULT 0,
         last_updated DATETIME
     )");
+
+    // Migrazione: aggiunta colonne a memorie_utenti
+    $result = $db->query("PRAGMA table_info(memorie_utenti)");
+    $cols = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $cols[] = $row['name'];
+    }
+    if (!in_array('bot_prompt', $cols)) {
+        $db->exec("ALTER TABLE memorie_utenti ADD COLUMN bot_prompt TEXT");
+    }
+    if (!in_array('last_processed_bot_id', $cols)) {
+        $db->exec("ALTER TABLE memorie_utenti ADD COLUMN last_processed_bot_id INTEGER DEFAULT 0");
+    }
+    if (!in_array('nickname', $cols)) {
+        $db->exec("ALTER TABLE memorie_utenti ADD COLUMN nickname TEXT");
+    }
+    if (!in_array('last_processed_nick_id', $cols)) {
+        $db->exec("ALTER TABLE memorie_utenti ADD COLUMN last_processed_nick_id INTEGER DEFAULT 0");
+    }
 
     // Storico messaggi: import una tantum dall'export Telegram Desktop.
     // Schema sostanzialmente uguale a contesto_chat ma SENZA pruning, con telegram_msg_id
@@ -98,6 +142,7 @@ function initDatabase() {
         user_name TEXT,
         message_text TEXT,
         timestamp INTEGER,
+        reply_to_user_id INTEGER,
         UNIQUE(group_id, telegram_msg_id)
     )");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_storico_user_time ON storico_messaggi(user_id, timestamp)");
@@ -151,6 +196,16 @@ function initDatabase() {
     // Pulizia automatica: rimuovi news più vecchie di 7 giorni
     $weekAgo = time() - (7 * 24 * 3600);
     $db->exec("DELETE FROM hn_posted WHERE posted_at < $weekAgo");
+
+    // Tabella per tracciare articoli della rassegna stampa già postati
+    $db->exec("CREATE TABLE IF NOT EXISTS rassegna_posted (
+        url TEXT PRIMARY KEY,
+        title TEXT,
+        posted_at INTEGER
+    )");
+    // Pulizia automatica: rimuovi articoli più vecchi di 30 giorni
+    $monthAgo = time() - (30 * 24 * 3600);
+    $db->exec("DELETE FROM rassegna_posted WHERE posted_at < $monthAgo");
 
     // Tabella per stato generico del bot (chiave-valore)
     $db->exec("CREATE TABLE IF NOT EXISTS bot_state (

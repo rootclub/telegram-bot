@@ -40,4 +40,18 @@ function makeAPIRequest($method, $parameters) {
 
     return $result;
 }
+
+/**
+ * Restituisce lo user_id Telegram del bot, cacheando il risultato in bot_state.
+ * Prima chiamata: invoca getMe. Successive: lettura da DB.
+ * Ritorna 0 in caso di errore.
+ */
+function getBotUserId() {
+    $cached = (int)getBotState('bot_user_id', 0);
+    if ($cached > 0) return $cached;
+    $resp = makeAPIRequest('getMe', []);
+    $id = (int)($resp['result']['id'] ?? 0);
+    if ($id > 0) setBotState('bot_user_id', $id);
+    return $id;
+}
 ?>

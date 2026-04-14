@@ -457,20 +457,17 @@ function analyzeImage($fileId, $caption = '', $chatId = null) {
     return $description;
 }
 
-function saveMessageToContext($groupId, $userName, $messageText, $userId = null) {
+function saveMessageToContext($groupId, $userName, $messageText, $userId = null, $replyToUserId = null) {
     global $db;
 
     // Inserisci il nuovo messaggio
-    $stmt = $db->prepare("INSERT INTO contesto_chat (group_id, user_name, message_text, timestamp, user_id) VALUES (:group_id, :user_name, :message_text, :timestamp, :user_id)");
+    $stmt = $db->prepare("INSERT INTO contesto_chat (group_id, user_name, message_text, timestamp, user_id, reply_to_user_id) VALUES (:group_id, :user_name, :message_text, :timestamp, :user_id, :reply_to_user_id)");
     $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
     $stmt->bindValue(':user_name', $userName, SQLITE3_TEXT);
     $stmt->bindValue(':message_text', $messageText, SQLITE3_TEXT);
     $stmt->bindValue(':timestamp', time(), SQLITE3_INTEGER);
-    if ($userId === null) {
-        $stmt->bindValue(':user_id', null, SQLITE3_NULL);
-    } else {
-        $stmt->bindValue(':user_id', $userId, SQLITE3_INTEGER);
-    }
+    $stmt->bindValue(':user_id', $userId, $userId === null ? SQLITE3_NULL : SQLITE3_INTEGER);
+    $stmt->bindValue(':reply_to_user_id', $replyToUserId, $replyToUserId === null ? SQLITE3_NULL : SQLITE3_INTEGER);
     $stmt->execute();
 
     // Conta il numero di messaggi per questo gruppo

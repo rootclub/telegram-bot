@@ -12,6 +12,9 @@ ini_set('max_execution_time', 0);
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/include/api.php';
 
+// DB per dedup articoli già postati
+$db = new SQLite3(__DIR__ . '/' . DB_FILE);
+
 // ID del gruppo principale
 define('MAIN_GROUP_ID', -1001402757977);
 
@@ -159,8 +162,9 @@ function fetchNewsWithDates() {
         $newsDate = mktime(0, 0, 0, $meseNum, $giorno, $anno);
         $todayStart = mktime(0, 0, 0);
 
-        // Considera solo news di oggi
-        if ($newsDate < $todayStart) {
+        // Considera news delle ultime 48 ore (buffer anti cron saltati; il dedup per URL evita doppioni)
+        $cutoff = time() - (48 * 3600);
+        if ($newsDate < $cutoff) {
             continue;
         }
 
@@ -234,11 +238,18 @@ function fetchNewsByPattern() {
     $annoOggi = date('Y');
     $dataOggi = "$oggi $meseOggi $annoOggi";
 
-    cron_log("Cerco news per data: $dataOggi");
+    // Data di ieri (per recuperare news pubblicate nelle ultime 23 ore)
+    $tsIeri = time() - 86400;
+    $giornoIeri = (int)date('j', $tsIeri);
+    $meseIeri = $mesiIt[(int)date('n', $tsIeri)];
+    $annoIeri = (int)date('Y', $tsIeri);
+    $dataIeri = "$giornoIeri $meseIeri $annoIeri";
 
-    // Cerca la data di oggi nel documento
-    if (strpos($html, $dataOggi) === false) {
-        cron_log("Nessuna news trovata per oggi");
+    cron_log("Cerco news per data: $dataOggi oppure $dataIeri");
+
+    // Se nessuna delle due date è presente nel documento, esci subito
+    if (strpos($html, $dataOggi) === false && strpos($html, $dataIeri) === false) {
+        cron_log("Nessuna news trovata per oggi né per ieri");
         return [];
     }
 
@@ -266,9 +277,9 @@ function fetchNewsByPattern() {
             continue;
         }
 
-        // Verifica che la data di oggi sia vicina a questo match (entro 1500 caratteri)
+        // Verifica che la data di oggi o di ieri sia vicina a questo match (entro 1500 caratteri)
         $context = substr($html, max(0, $pos - 500), 2000);
-        if (strpos($context, $dataOggi) !== false) {
+        if (strpos($context, $dataOggi) !== false || strpos($context, $dataIeri) !== false) {
             $seenUrls[$url] = true;
             $news[] = [
                 'titolo' => $titolo,
@@ -308,6 +319,13 @@ function formatRassegna($news) {
 try {
     cron_log("=== Starting rassegna stampa ===");
 
+    // Assicura che la tabella di dedup esista (nel caso initDatabase non sia ancora stato eseguito)
+    $db->exec("CREATE TABLE IF NOT EXISTS rassegna_posted (
+        url TEXT PRIMARY KEY,
+        title TEXT,
+        posted_at INTEGER
+    )");
+
     // Prova prima il metodo pattern
     cron_log("Fetching news...");
     $news = fetchNewsByPattern();
@@ -317,10 +335,25 @@ try {
         $news = fetchNewsWithDates();
     }
 
-    cron_log("Found " . count($news) . " news for today");
+    cron_log("Found " . count($news) . " news nelle ultime 48h");
+
+    // Filtra articoli già postati in precedenza
+    $stmt = $db->prepare("SELECT 1 FROM rassegna_posted WHERE url = :url");
+    $newsFiltrate = [];
+    foreach ($news as $item) {
+        $stmt->bindValue(':url', $item['url'], SQLITE3_TEXT);
+        $res = $stmt->execute();
+        $row = $res ? $res->fetchArray(SQLITE3_ASSOC) : false;
+        $stmt->reset();
+        if (!$row) {
+            $newsFiltrate[] = $item;
+        }
+    }
+    $news = $newsFiltrate;
+    cron_log("After dedup: " . count($news) . " nuovi articoli da postare");
 
     if (empty($news)) {
-        cron_log("No news for today, skipping");
+        cron_log("No new news, skipping");
         @unlink($lockFile);
         exit(0);
     }
@@ -347,6 +380,19 @@ try {
 
     if ($result && $result['ok']) {
         cron_log("Message sent successfully!");
+        // Salva gli URL appena postati per evitare doppioni ai prossimi run
+        $ins = $db->prepare("INSERT OR REPLACE INTO rassegna_posted (url, title, posted_at) VALUES (:url, :title, :ts)");
+        $now = time();
+        foreach ($news as $item) {
+            $ins->bindValue(':url', $item['url'], SQLITE3_TEXT);
+            $ins->bindValue(':title', $item['titolo'], SQLITE3_TEXT);
+            $ins->bindValue(':ts', $now, SQLITE3_INTEGER);
+            $ins->execute();
+            $ins->reset();
+        }
+        // Pulizia: rimuovi articoli più vecchi di 30 giorni
+        $monthAgo = time() - (30 * 24 * 3600);
+        $db->exec("DELETE FROM rassegna_posted WHERE posted_at < $monthAgo");
     } else {
         cron_log("Failed to send message: " . json_encode($result));
     }

@@ -151,9 +151,15 @@ if (isset($update['message'])) {
         }
     }
 
+    // Estrai reply_to_user_id se il messaggio è una risposta a un altro utente
+    $replyToUserId = null;
+    if (isset($message['reply_to_message']['from']['id'])) {
+        $replyToUserId = (int)$message['reply_to_message']['from']['id'];
+    }
+
     // Salva nel contesto PRIMA di processMessage (così l'AI ha il contesto aggiornato)
     if (!empty(trim($messageText))) {
-        saveMessageToContext($groupId, $userName, $messageText, $userId);
+        saveMessageToContext($groupId, $userName, $messageText, $userId, $replyToUserId);
     }
     // Salva l'analisi immagine come messaggio separato del bot
     if (!empty($botImageAnalysis)) {
@@ -242,8 +248,11 @@ if (isset($update['message'])) {
             $messageText = str_replace('@bot', '', $messageText);
             $messageText = str_replace('@root', '', $messageText);
 
+            $editReplyToUserId = isset($editedMessage['reply_to_message']['from']['id'])
+                ? (int)$editedMessage['reply_to_message']['from']['id'] : null;
+
             if (!empty(trim($messageText))) {
-                saveMessageToContext($chatId, $userName, $messageText, $userId);
+                saveMessageToContext($chatId, $userName, $messageText, $userId, $editReplyToUserId);
             }
 
             processMessage($editedMessage);

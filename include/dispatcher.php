@@ -92,7 +92,7 @@ function classifyIntent(string $message, int $chatID = 0): array {
         'model' => OLLAMA_MODEL_LIGHT,
         'prompt' => $prompt,
         'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
+        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['num_ctx' => 2048]),
     ];
 
     $startTime = microtime(true);
