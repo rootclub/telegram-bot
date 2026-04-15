@@ -207,10 +207,12 @@ if ($action === 'show' && $userId > 0) {
         $stmt = $db->prepare("
             SELECT
                 (SELECT COUNT(*) FROM contesto_chat
-                 WHERE user_id = :uid AND timestamp <= :ts AND length(message_text) >= :ml)
+                 WHERE user_id = :uid AND timestamp <= :ts AND length(message_text) >= :ml
+                   AND ltrim(message_text) NOT GLOB '/*')
                 +
                 (SELECT COUNT(*) FROM storico_messaggi
-                 WHERE user_id = :uid AND timestamp <= :ts AND length(message_text) >= :ml)
+                 WHERE user_id = :uid AND timestamp <= :ts AND length(message_text) >= :ml
+                   AND ltrim(message_text) NOT GLOB '/*')
             AS processed
         ");
         $stmt->bindValue(':uid', $userId, SQLITE3_INTEGER);

@@ -35,10 +35,8 @@ function ollamaOptions(bool $useGpu, array $extra = []): array {
         'temperature' => OLLAMA_TEMPERATURE,
         'top_p' => OLLAMA_TOP_P,
         'top_k' => OLLAMA_TOP_K,
+        'num_gpu' => $useGpu ? 99 : 0,
     ];
-    if (!$useGpu) {
-        $opts['num_gpu'] = 0;
-    }
     return array_merge($opts, $extra);
 }
 
@@ -79,6 +77,55 @@ function callOllamaViaQBert($requestData, $priority = QBertClient::PRIORITY_NORM
     }
 
     return null;
+}
+
+/**
+ * Chiama Ollama /api/chat via QBert. Restituisce una shape normalizzata
+ * equivalente a /api/generate: ['response' => <content>, 'thinking' => <thinking>, ...]
+ * in modo che i chiamanti non debbano distinguere il formato.
+ *
+ * Richiesto per Gemma 4: su /api/generate il flag `think` è instabile,
+ * su /api/chat funziona correttamente. Passa `$think` come top-level del body.
+ *
+ * @param string $model
+ * @param string $prompt      Contenuto del messaggio user
+ * @param array  $options     Options Ollama (num_ctx, num_predict, temperature, ecc.)
+ * @param bool|null $think    true/false per forzare; null per lasciare default modello
+ * @param string $priority
+ * @return array|null  ['response' => string, 'thinking' => string, 'done_reason' => ..., 'raw' => <full>]
+ */
+function callOllamaChatViaQBert(string $model, string $prompt, array $options = [], ?bool $think = null, $priority = QBertClient::PRIORITY_NORMAL) {
+    $qbert = getQBertClient();
+
+    $body = [
+        'model'    => $model,
+        'messages' => [['role' => 'user', 'content' => $prompt]],
+        'stream'   => false,
+        'options'  => $options,
+    ];
+    if ($think !== null) {
+        $body['think'] = $think;
+    }
+
+    $result = $qbert->post('ollama', '/api/chat', $body, $priority);
+    if ($result['is_ticket']) {
+        $result = $qbert->waitForTicket($result['ticket_id']);
+    }
+    if (!isset($result['json']) || !is_array($result['json'])) {
+        return null;
+    }
+    $json = $result['json'];
+    $msg = $json['message'] ?? [];
+    return [
+        'response'           => (string)($msg['content'] ?? ''),
+        'thinking'           => (string)($msg['thinking'] ?? ''),
+        'done'               => $json['done'] ?? null,
+        'done_reason'        => $json['done_reason'] ?? null,
+        'prompt_eval_count'  => $json['prompt_eval_count'] ?? null,
+        'eval_count'         => $json['eval_count'] ?? null,
+        'total_duration'     => $json['total_duration'] ?? null,
+        'raw'                => $json,
+    ];
 }
 
 /**
