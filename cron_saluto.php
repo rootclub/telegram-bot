@@ -60,26 +60,23 @@ try {
 
     cron_log("Saluto generated, length: " . strlen($saluto));
 
-    // Invia al gruppo
+    // Invia al gruppo (parse_mode=HTML: il wrapper escapa automaticamente
+    // il testo LLM; il prompt di _saluto produce testo plain, nessun tag intenzionale)
     cron_log("Sending to Telegram...");
-    $messageParams = [
-        'chat_id' => MAIN_GROUP_ID,
-        'text' => $saluto,
-        'parse_mode' => 'HTML'
-    ];
+    $options = ['parse_mode' => 'HTML'];
     if (TTS_ENABLED) {
-        $messageParams['reply_markup'] = json_encode([
+        $options['reply_markup'] = json_encode([
             'inline_keyboard' => [[
                 ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
             ]]
         ]);
     }
-    $result = makeAPIRequest('sendMessage', $messageParams);
+    $result = sendTelegramMessage(MAIN_GROUP_ID, $saluto, $options);
 
-    if ($result && $result['ok']) {
+    if ($result['ok']) {
         cron_log("Message sent successfully!");
     } else {
-        cron_log("Failed to send message: " . json_encode($result));
+        cron_log("Failed to send message: err=" . ($result['error_code'] ?? '?') . " desc=" . ($result['description'] ?? ''));
     }
 
 } catch (Exception $e) {

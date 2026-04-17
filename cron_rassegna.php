@@ -370,16 +370,15 @@ try {
 
     cron_log("Message formatted, length: " . strlen($messaggio));
 
-    // Invia al gruppo
+    // Invia al gruppo. $messaggio è già HTML-safe (formatRassegna escapa i titoli con
+    // htmlspecialchars e compone tag fissi <b>/<a>), quindi lo avvolgo in TelegramHtml
+    // per evitare il double-escape del wrapper.
     cron_log("Sending to Telegram...");
-    $result = makeAPIRequest('sendMessage', [
-        'chat_id' => MAIN_GROUP_ID,
-        'text' => $messaggio,
-        'parse_mode' => 'HTML',
-        'disable_web_page_preview' => true
+    $result = sendTelegramMessage(MAIN_GROUP_ID, new TelegramHtml($messaggio), [
+        'disable_web_page_preview' => true,
     ]);
 
-    if ($result && $result['ok']) {
+    if ($result['ok']) {
         cron_log("Message sent successfully!");
         // Salva gli URL appena postati per evitare doppioni ai prossimi run
         $ins = $db->prepare("INSERT OR REPLACE INTO rassegna_posted (url, title, posted_at) VALUES (:url, :title, :ts)");

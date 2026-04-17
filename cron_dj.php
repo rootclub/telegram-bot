@@ -91,17 +91,14 @@ try {
 
     dj_log("Messaggio generato (" . strlen($djMessage) . " chars)");
 
-    // Invia al gruppo
-    $result = makeAPIRequest('sendMessage', [
-        'chat_id' => MAIN_GROUP_ID,
-        'text' => $djMessage
-    ]);
+    // Invia al gruppo in plain text (no parse_mode): output LLM passato così com'è.
+    $result = sendTelegramMessage(MAIN_GROUP_ID, $djMessage);
 
-    if ($result && $result['ok']) {
+    if ($result['ok']) {
         dj_log("Messaggio inviato con successo!");
         setBotState('dj_last_post', time());
     } else {
-        dj_log("Errore invio: " . json_encode($result));
+        dj_log("Errore invio: err=" . ($result['error_code'] ?? '?') . " desc=" . ($result['description'] ?? ''));
     }
 
 } catch (Exception $e) {
