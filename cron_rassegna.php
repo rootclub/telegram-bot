@@ -11,6 +11,7 @@ ini_set('max_execution_time', 0);
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/include/api.php';
+require_once __DIR__ . '/include/logger.php';
 require_once __DIR__ . '/include/telegram.php';
 
 // DB per dedup articoli già postati
@@ -39,8 +40,9 @@ if (file_exists($lockFile)) {
 
 file_put_contents($lockFile, time());
 
+// Logging via logger centrale (logs/rassegna.log, accessibile da diag.php).
 function cron_log($msg) {
-    error_log("[cron_rassegna] $msg");
+    logLine('rassegna', "[cron_rassegna] $msg");
 }
 
 /**

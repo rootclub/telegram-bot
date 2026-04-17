@@ -37,9 +37,9 @@ if (file_exists($lockFile)) {
 
 file_put_contents($lockFile, time());
 
-// Logging via error_log
+// Logging via logger centrale (logs/saluto.log, stesso canale di _saluto() in ai.php).
 function cron_log($msg) {
-    error_log("[cron_saluto] $msg");
+    logLine('saluto', "[cron_saluto] $msg");
 }
 
 try {

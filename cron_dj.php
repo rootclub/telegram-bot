@@ -29,9 +29,11 @@ define('POST_PROBABILITY', 15);        // Probabilità % di postare (0-100)
 define('MIN_HOURS_BETWEEN_POSTS', 2);  // Minimo ore tra un post e l'altro
 define('MIN_MESSAGES_TO_POST', 3);     // Minimo messaggi nell'ultima ora per considerare
 
-// Logging via error_log (va nel log di PHP/sistema)
+// Logging via logger centrale (visibile in logs/dj_debug.log, accessibile da diag.php).
+// Stesso canale usato da _dj()/fetchHN/ecc. in ai.php: così l'intera attività DJ
+// resta unificata in un solo file.
 function dj_log($msg) {
-    error_log("[cron_dj] $msg");
+    logLine('dj_debug', "[cron_dj] $msg");
 }
 
 // Lock anti-duplicati (in /tmp per evitare problemi di permessi)
