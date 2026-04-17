@@ -2,6 +2,8 @@
 /**
  * Agente Image Gen — genera immagini via ComfyUI (z-image turbo)
  */
+require_once dirname(__DIR__) . '/logger.php';
+
 return [
     'id' => 'image_gen',
     'description' => "L'utente chiede di generare, creare, disegnare o immaginare un'immagine, una foto, un disegno, un'illustrazione (es. 'genera un'immagine di...', 'disegna un gatto', 'fammi vedere un tramonto', 'crea un'illustrazione', 'immagina...')",
@@ -11,7 +13,7 @@ return [
     ],
     'sends_own_response' => true,
     'handler' => function (array $ctx, array $params): ?array {
-        $logFile = dirname(__DIR__, 2) . '/image_gen.log';
+        $logFile = logPath('image_gen');
         $log = function (string $msg) use ($logFile) {
             file_put_contents($logFile, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);
         };

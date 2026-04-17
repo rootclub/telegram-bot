@@ -4,6 +4,7 @@
 ////////////////////////////////////////////////////////////////
 
 require_once __DIR__ . '/QBertClient.php';
+require_once __DIR__ . '/logger.php';
 
 /**
  * Rimuove i tag di thinking di Gemma 4 dalla risposta
@@ -334,7 +335,7 @@ function callOllamaChatViaQBertWithTyping(string $model, string $prompt, int $ch
  * @return array ['needs_wiki' => bool, 'search_term' => string|null]
  */
 function classifyForWikipedia($message) {
-    $logFile = dirname(__DIR__) . '/wiki_search.log';
+    $logFile = logPath('wiki_search');
 
     // Prompt compatto per classificazione + estrazione
     $prompt = <<<PROMPT
@@ -406,7 +407,7 @@ PROMPT;
  * @return string|null Contenuto Wikipedia formattato o null
  */
 function getWikipediaContext($searchTerm) {
-    $logFile = dirname(__DIR__) . '/wiki_search.log';
+    $logFile = logPath('wiki_search');
 
     // Cerca prima su Wikipedia italiana (il bot è italiano)
     $resultIt = fetchWikipediaContentByLang($searchTerm, 'it');
@@ -466,7 +467,7 @@ function getWikipediaContext($searchTerm) {
  * @return string|null Descrizione dell'immagine o null se fallisce
  */
 function analyzeImage($fileId, $caption = '', $chatId = null) {
-    $logFile = dirname(__DIR__) . '/debug.log';
+    $logFile = logPath('debug');
     file_put_contents($logFile, "=== analyzeImage START ===\n", FILE_APPEND);
     file_put_contents($logFile, "fileId=$fileId\n", FILE_APPEND);
     file_put_contents($logFile, "caption=" . substr($caption, 0, 50) . "\n", FILE_APPEND);
@@ -896,7 +897,7 @@ PROMPT;
     $logEntry .= "[" . date('Y-m-d H:i:s') . "] Utente: {$userName}\n";
     $logEntry .= str_repeat('-', 60) . "\n";
     $logEntry .= $prompt . "\n";
-    file_put_contents(dirname(__DIR__) . '/ai.log', $logEntry, FILE_APPEND);
+    file_put_contents(logPath('ai'), $logEntry, FILE_APPEND);
 
     // Chiama Ollama via QBert con typing refresh (/api/chat + think=false: Gemma 4 pattern)
     $result = callOllamaChatViaQBertWithTyping(
@@ -927,7 +928,7 @@ PROMPT;
     $logEntry = str_repeat('-', 60) . "\n";
     $logEntry .= "RISPOSTA:\n{$response}\n";
     $logEntry .= str_repeat('=', 60) . "\n";
-    file_put_contents(dirname(__DIR__) . '/ai.log', $logEntry, FILE_APPEND);
+    file_put_contents(logPath('ai'), $logEntry, FILE_APPEND);
 
     return $response;
 }
@@ -1026,7 +1027,7 @@ PROMPT;
 }
 
 function _saluto($chatID, $daysAgo = 0) {
-    $logFile = dirname(__DIR__) . '/saluto.log';
+    $logFile = logPath('saluto');
 
     // Log di inizio
     file_put_contents($logFile, "\n=== SALUTO START " . date('Y-m-d H:i:s') . " ===\n", FILE_APPEND);
@@ -1145,7 +1146,7 @@ function _dj($chatID, $hoursAgo = 0) {
     $model = OLLAMA_MODEL;
 
     // Log dettagliato per debug
-    $djLog = __DIR__ . '/../dj_debug.log';
+    $djLog = logPath('dj_debug');
     $timestamp = date('Y-m-d H:i:s');
     $currentHour = (int)date('G');
     $ora = date('H:i');
@@ -1289,7 +1290,7 @@ Un breve commento (3-4 frasi max). Niente emoji. Prospettiva non umana ma access
 PROMPT;
     }
 
-    file_put_contents(dirname(__DIR__) . '/ai.log', "=== DJ REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
+    file_put_contents(logPath('ai'), "=== DJ REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
 
     // Chiama Ollama via QBert (DJ è un job in background, priorità lazy) - /api/chat + think=false
     $result = callOllamaChatViaQBert(
@@ -1334,13 +1335,13 @@ PROMPT;
         file_put_contents($djLog, "HN: story {$hnStoryId} marcata come postata\n", FILE_APPEND);
     }
 
-    file_put_contents(dirname(__DIR__) . '/ai.log', "=== DJ RESPONSE ===\n" . $response . "\n\n", FILE_APPEND);
+    file_put_contents(logPath('ai'), "=== DJ RESPONSE ===\n" . $response . "\n\n", FILE_APPEND);
 
     return $response;
 }
 
 function fetchHackerNewsTopStories($limit = 30) {
-    $djLog = __DIR__ . '/../dj_debug.log';
+    $djLog = logPath('dj_debug');
 
     // Fetch best stories IDs (qualità più alta rispetto a topstories)
     $ch = curl_init('https://hacker-news.firebaseio.com/v0/beststories.json');
@@ -1427,7 +1428,7 @@ function setBotState($key, $value) {
 }
 
 function pickBestHNStory($stories) {
-    $djLog = __DIR__ . '/../dj_debug.log';
+    $djLog = logPath('dj_debug');
 
     if (empty($stories)) return null;
 
@@ -1494,7 +1495,7 @@ function extractUrlsWithReactions($context) {
 }
 
 function fetchUrlContent($url) {
-    $djLog = __DIR__ . '/../dj_debug.log';
+    $djLog = logPath('dj_debug');
 
     // YouTube (video normali e Shorts) - usa noembed che funziona meglio
     if (preg_match('/(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]+)/', $url, $ytMatch)) {
@@ -1696,7 +1697,7 @@ function generateTTSWithTyping($text, $chatId) {
     makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_voice']);
     $lastTypingTime = time();
 
-    $logFile = dirname(__DIR__) . '/debug.log';
+    $logFile = logPath('debug');
 
     // Submit non-bloccante via QBertClient (con multipart e header corretti)
     $result = $qbert->submit('POST', 'qwen-tts', '/voice-clone', multipart: $formData, note: 'tts_typing');
@@ -1832,7 +1833,7 @@ function handleTTSCallback($callbackQuery) {
     ]);
 
     // Genera TTS con typing indicator
-    $logFile = dirname(__DIR__) . '/debug.log';
+    $logFile = logPath('debug');
     file_put_contents($logFile, "[TTS] Generating for msg $messageId, text length=" . strlen($text) . "\n", FILE_APPEND);
 
     $wavData = generateTTSWithTyping($text, $chatId);

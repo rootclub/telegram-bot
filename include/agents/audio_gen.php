@@ -5,6 +5,8 @@
  * Flow: prompt utente → LLM (guida ACE-Step) → CAPTION/LYRICS/BPM/KEYSCALE/LANGUAGE/DURATION
  *       → workflow ComfyUI → MP3 → sendAudio.
  */
+require_once dirname(__DIR__) . '/logger.php';
+
 return [
     'id' => 'audio_gen',
     'description' => "L'utente chiede di generare, comporre, creare o scrivere un brano musicale, una canzone, un pezzo, una musica, una sigla, una ballata (es. 'crea un brano rock', 'componi una canzone su...', 'fammi un pezzo lo-fi', 'scrivi una ballata triste', 'genera una sigla strumentale')",
@@ -13,7 +15,7 @@ return [
     ],
     'sends_own_response' => true,
     'handler' => function (array $ctx, array $params): ?array {
-        $logFile = dirname(__DIR__, 2) . '/audio_gen.log';
+        $logFile = logPath('audio_gen');
         $log = function (string $msg) use ($logFile) {
             file_put_contents($logFile, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);
         };

@@ -13,11 +13,12 @@ ini_set('max_execution_time', 120);
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/include/database.php';
 require_once __DIR__ . '/include/user_memory.php';
+require_once __DIR__ . '/include/logger.php';
 
 $db = new SQLite3(__DIR__ . '/' . DB_FILE);
 initDatabase();
 
-$logFile = __DIR__ . '/memory_cron.log';
+$logFile = logPath('memory_cron');
 $log = function($msg) use ($logFile) {
     $line = date('Y-m-d H:i:s') . " [cron_memory] $msg\n";
     file_put_contents($logFile, $line, FILE_APPEND);

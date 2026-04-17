@@ -3,6 +3,8 @@
 ///////////////// DISPATCHER MODULARE SUB-AGENTI ////////////////
 /////////////////////////////////////////////////////////////////
 
+require_once __DIR__ . '/logger.php';
+
 /**
  * Carica il registry degli agenti da include/agents/*.php
  * Ogni file ritorna un array con: id, description, parameters, handler, ecc.
@@ -78,7 +80,7 @@ PROMPT;
 function classifyIntent(string $message, int $chatID = 0): array {
     $registry = loadAgentRegistry();
     $defaultIntent = $registry['default'] ?? 'chat';
-    $logFile = dirname(__DIR__) . '/dispatcher.log';
+    $logFile = logPath('dispatcher');
 
     // Recupera ultimi 3 messaggi per dare contesto al classificatore
     $recentContext = '';

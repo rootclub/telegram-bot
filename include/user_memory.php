@@ -5,6 +5,7 @@
 
 require_once __DIR__ . '/ai.php';
 require_once __DIR__ . '/api.php';
+require_once __DIR__ . '/logger.php';
 
 // Soglia minima di messaggi "utili" prima di generare un profilo
 define('USER_MEMORY_MIN_MESSAGES', 30);
@@ -257,7 +258,7 @@ function compressUserProfile($userId, $userName, string $profile, bool $verbose 
         QBertClient::PRIORITY_LAZY
     );
 
-    $logFile = dirname(__DIR__) . '/memory.log';
+    $logFile = logPath('memory');
     $compressLog = $compressResponse ?: ['error' => 'null response'];
     if (is_array($compressLog)) unset($compressLog['context']);
     file_put_contents($logFile, "=== COMPRESS user=$userName id=$userId orig=$origLen " . date('Y-m-d H:i:s') . " ===\nRESPONSE:\n" . print_r($compressLog, true) . "\n\n", FILE_APPEND);
@@ -903,7 +904,7 @@ function updateUserMemory($userId, $verbose = false, $useGpu = false) {
         QBertClient::PRIORITY_LAZY
     );
 
-    $logFile = dirname(__DIR__) . '/memory.log';
+    $logFile = logPath('memory');
     $logHeader = "=== PROFILE user=$userName id=$userId " . date('Y-m-d H:i:s') . " ===\n";
     $logResponse = $response;
     unset($logResponse['raw']);

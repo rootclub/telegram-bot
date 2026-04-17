@@ -5,6 +5,7 @@
  */
 
 require_once __DIR__ . '/QBertClient.php';
+require_once __DIR__ . '/logger.php';
 
 /**
  * Chiama Ollama con un modello specifico via QBert
@@ -195,7 +196,7 @@ function updateQuizStatus($chatId, $messageId, $text) {
 function generateAndSendQuiz($chatId, $topic, $userId, $userName) {
     global $db;
 
-    $logFile = dirname(__DIR__) . '/quiz.log';
+    $logFile = logPath('quiz');
     $statusMessageId = null;
 
     // Se topic null o vuoto, scegli random dal DB

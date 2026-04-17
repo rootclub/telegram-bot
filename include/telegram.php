@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/logger.php';
+
 /**
  * Layer semantico sopra api.php per invio messaggi Telegram.
  *
@@ -246,9 +248,7 @@ function _tgSendWithRetry(string $method, array $payload, bool $noRetry): array 
     }
 }
 
-/** Logger dedicato: telegram.log nella root del progetto. */
+/** Logger dedicato: logs/telegram.log (via logger centrale, rotazione inclusa). */
 function tgLog(string $msg): void {
-    $ts = date('Y-m-d H:i:s');
-    $logPath = dirname(__DIR__) . '/telegram.log';
-    @file_put_contents($logPath, "[$ts] $msg\n", FILE_APPEND);
+    logLine('telegram', $msg);
 }

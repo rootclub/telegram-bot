@@ -2,6 +2,7 @@
 include "config.php";
 include "include/database.php";
 include "include/api.php";
+include "include/logger.php";
 include "include/telegram.php";
 include "include/image.php";
 include "include/help.php";
@@ -19,7 +20,7 @@ initDatabase();
 
 $update = json_decode(file_get_contents('php://input'), true);
 
-file_put_contents('debug.log', print_r($update, true) . "\n\n", FILE_APPEND);
+file_put_contents(logPath('debug'), print_r($update, true) . "\n\n", FILE_APPEND);
 
 // Rispondi subito 200 a Telegram per evitare timeout e retry
 http_response_code(200);
@@ -108,17 +109,17 @@ if (isset($update['message'])) {
 
     // Gestisci documenti immagine (inviati senza compressione)
     if (isset($message['document'])) {
-        file_put_contents('debug.log', "=== DOCUMENT DETECTED ===\n", FILE_APPEND);
-        file_put_contents('debug.log', "mime=" . ($message['document']['mime_type'] ?? 'none') . "\n", FILE_APPEND);
-        file_put_contents('debug.log', "isImageDocument=" . (isImageDocument($message['document']) ? 'YES' : 'NO') . "\n", FILE_APPEND);
+        file_put_contents(logPath('debug'), "=== DOCUMENT DETECTED ===\n", FILE_APPEND);
+        file_put_contents(logPath('debug'), "mime=" . ($message['document']['mime_type'] ?? 'none') . "\n", FILE_APPEND);
+        file_put_contents(logPath('debug'), "isImageDocument=" . (isImageDocument($message['document']) ? 'YES' : 'NO') . "\n", FILE_APPEND);
     }
     if (isset($message['document']) && isImageDocument($message['document'])) {
         $fileId = $message['document']['file_id'];
         $caption = $message['caption'] ?? '';
-        file_put_contents('debug.log', "Processing document image, caption=" . substr($caption, 0, 50) . "\n", FILE_APPEND);
+        file_put_contents(logPath('debug'), "Processing document image, caption=" . substr($caption, 0, 50) . "\n", FILE_APPEND);
 
         $imageDescription = analyzeImage($fileId, $caption, $groupId);
-        file_put_contents('debug.log', "analyzeImage returned: " . ($imageDescription ? "OK (" . strlen($imageDescription) . " chars)" : "NULL") . "\n", FILE_APPEND);
+        file_put_contents(logPath('debug'), "analyzeImage returned: " . ($imageDescription ? "OK (" . strlen($imageDescription) . " chars)" : "NULL") . "\n", FILE_APPEND);
 
         // Messaggio utente: ha condiviso un'immagine (+ eventuale caption)
         if ($caption) {
@@ -200,7 +201,7 @@ if (isset($update['message'])) {
         }
 
         if ($replyFileId !== null && !empty(trim($messageText))) {
-            file_put_contents('debug.log', "=== REPLY TO IMAGE: rilancio vision con domanda ===\n", FILE_APPEND);
+            file_put_contents(logPath('debug'), "=== REPLY TO IMAGE: rilancio vision con domanda ===\n", FILE_APPEND);
             $question = trim($messageText);
             $imageAnswer = analyzeImage($replyFileId, $question, $groupId);
 

@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/logger.php';
+
 // Assicurati che la directory esista
 if (!file_exists(IMAGE_SAVE_PATH)) {
     mkdir(IMAGE_SAVE_PATH, 0755, true);
@@ -7,7 +9,7 @@ if (!file_exists(IMAGE_SAVE_PATH)) {
 // TODO: Rimuovere in futuro quando il sistema sarà stabile
 // Funzione di logging dedicata per debug immagini
 function image_log($message) {
-    $logFile = __DIR__ . '/../image_debug.log';
+    $logFile = logPath('image_debug');
     $timestamp = date('Y-m-d H:i:s');
     file_put_contents($logFile, "[$timestamp] $message\n", FILE_APPEND);
 }

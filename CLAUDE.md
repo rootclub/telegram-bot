@@ -259,13 +259,23 @@ Since this is a webhook-based bot, you'll need:
 4. Check `dispatcher.log` on the server for classification results
 
 ### Log Files
-- `debug.log` — Telegram updates, general debug
-- `ai.log` — AI prompts and responses
-- `dispatcher.log` — Intent classification results
-- `wiki_search.log` — Wikipedia classification and searches
-- `dj_debug.log` — DJ/spontaneous comment debug
-- `image_gen.log` — Image generation agent debug
-- `audio_gen.log` — Music/audio generation agent debug
+
+Tutti i log vivono in `logs/` sul server. La risoluzione del path passa sempre per `logPath('channel')` definito in `include/logger.php`, che gestisce anche la rotazione automatica (soglia 10 MB, 1 backup in `$channel.log.1`). Per righe semplici c'è anche `logLine('channel', $msg)`.
+
+Canali attivi:
+- `logs/debug.log` — Telegram updates, general debug
+- `logs/ai.log` — AI prompts and responses
+- `logs/dispatcher.log` — Intent classification results
+- `logs/wiki_search.log` — Wikipedia classification and searches
+- `logs/dj_debug.log` — DJ/spontaneous comment debug
+- `logs/saluto.log` — Evening recap diagnostics
+- `logs/image_gen.log` — Image generation agent debug
+- `logs/audio_gen.log` — Music/audio generation agent debug
+- `logs/image_debug.log` — Image download/processing debug
+- `logs/memory.log` — User memory extraction diagnostics
+- `logs/memory_cron.log` — Nightly user-memory cron job
+- `logs/quiz.log` — Quiz generation pipeline
+- `logs/telegram.log` — Telegram API wrapper (retry, errors)
 
 ### Utility Scripts
 - `admin_user_memory.php` — Web interface for user memory management (protected by `MEMORY_ADMIN_TOKEN`)
