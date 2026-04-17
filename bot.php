@@ -2,6 +2,7 @@
 include "config.php";
 include "include/database.php";
 include "include/api.php";
+include "include/telegram.php";
 include "include/image.php";
 include "include/help.php";
 include "include/ai.php";

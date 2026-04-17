@@ -13,6 +13,7 @@ ini_set('max_execution_time', 0);
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/include/database.php';
 require_once __DIR__ . '/include/api.php';
+require_once __DIR__ . '/include/telegram.php';
 require_once __DIR__ . '/include/ai.php';
 
 // Inizializza connessione database
