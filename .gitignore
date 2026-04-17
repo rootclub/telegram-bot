@@ -2,3 +2,4 @@
 *.log
 telegram_bot.sqlite
 .deploy-config
+.diag-token
