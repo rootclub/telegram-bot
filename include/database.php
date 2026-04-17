@@ -237,6 +237,16 @@ function initDatabase() {
     $oneHourAgo = time() - 3600;
     $db->exec("DELETE FROM image_gen_usage WHERE timestamp < $oneHourAgo");
 
+    // Rate limit generazione audio/brani
+    $db->exec("CREATE TABLE IF NOT EXISTS audio_gen_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_audio_gen_user ON audio_gen_usage(user_id, timestamp)");
+    // Pulizia automatica: rimuovi record più vecchi di 1 ora
+    $db->exec("DELETE FROM audio_gen_usage WHERE timestamp < $oneHourAgo");
+
     // Migration: aggiungi colonne se non esistono
     // Per user_states - aggiungi user_id e created_at
     $result = $db->query("PRAGMA table_info(user_states)");

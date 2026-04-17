@@ -69,6 +69,7 @@ return [
 - **`quiz.php`**: Quiz/trivia requests — calls `generateAndSendQuiz()`, sends its own poll
 - **`image_query.php`**: Questions about previously shared images — matches reference via LLM light, re-analyzes with `analyzeImage()`
 - **`image_gen.php`**: Image generation via ComfyUI — translates Italian prompt to English via LLM, submits to z-image turbo workflow, rate limited (6/hour per user)
+- **`audio_gen.php`**: Music/song generation via ComfyUI (ACE-Step 1.5 XL Turbo) — LLM (full model) composes CAPTION/LYRICS/BPM/KEYSCALE/LANGUAGE/DURATION from the ACE-Step guide, submits workflow, sends MP3 as `sendAudio`, rate limited (6/hour per user)
 
 #### Classifier Flow
 
@@ -129,6 +130,17 @@ The `image_gen` agent generates images via ComfyUI (z-image turbo workflow):
 - Supports formats: landscape (1280x720), portrait (720x1280), square (1024x1024)
 - Rate limit: 6 images/hour per user (tracked in `image_gen_usage` table)
 - Recent chat context used to resolve references ("fanne un'altra ma con...")
+
+### Audio/Music Generation
+
+The `audio_gen` agent generates songs via ComfyUI (ACE-Step 1.5 XL Turbo):
+1. LLM (`OLLAMA_MODEL` full) receives the ACE-Step compact guide as system prompt and composes the full brief
+2. LLM output format parsed: `##CAPTION:` (style tags), `##LYRICS:` (structured lyrics), `#BPM:`, `#KEYSCALE:`, `#LANGUAGE:` (ISO 2-letter), `#DURATION:` (seconds)
+3. Parser applies clamps: BPM ∈ [60,200], DURATION ∈ [90,240]; fallbacks for missing fields; aborts before ComfyUI if CAPTION or LYRICS missing
+4. Workflow `workflows/audio_ace_step1_5_xl_turbo.json` loaded and parameterized (nodes `94` tags/lyrics/bpm/keyscale/language/duration, `98` seconds, `109` seed)
+5. Polls `/history` up to 240s, fetches MP3 from `/view?...&subfolder=audio`, sends via `sendAudio` with `title`, `performer="rootbot"`, `duration`
+- Rate limit: 6 songs/hour per user (tracked in `audio_gen_usage` table)
+- Recent chat context used to resolve references ("stesso stile ma più lento", "fanne uno in italiano")
 
 ### Cron Jobs
 
@@ -209,6 +221,10 @@ The `image_gen` agent generates images via ComfyUI (z-image turbo workflow):
     - `url` (PK), `title`, `posted_at`
     - Auto-cleanup: records older than 30 days
 
+24. **audio_gen_usage** - Rate limiting for AI music generation
+    - `id`, `user_id`, `timestamp`
+    - Auto-cleanup: records older than 1 hour
+
 ## Development Commands
 
 ### Deploy
@@ -249,6 +265,7 @@ Since this is a webhook-based bot, you'll need:
 - `wiki_search.log` — Wikipedia classification and searches
 - `dj_debug.log` — DJ/spontaneous comment debug
 - `image_gen.log` — Image generation agent debug
+- `audio_gen.log` — Music/audio generation agent debug
 
 ### Utility Scripts
 - `admin_user_memory.php` — Web interface for user memory management (protected by `MEMORY_ADMIN_TOKEN`)

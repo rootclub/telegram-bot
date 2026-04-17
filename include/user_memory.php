@@ -358,7 +358,6 @@ function buildBotPromptExtractionPrompt($userName, $existingBotPrompt, $messages
     $maxLen = USER_MEMORY_MAX_BOT_PROMPT_LENGTH;
 
     return <<<PROMPT
-<|think|>
 Sei rootbot, il bot di un gruppo Telegram. Devi costruire le tue istruzioni personali su come interagire con un utente specifico, basandoti sulle sue interazioni reali con te.
 
 {$existingBlock}MESSAGGI DI $userName CHE COINVOLGONO IL BOT (menzioni, risposte, interazioni dirette):

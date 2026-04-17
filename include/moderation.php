@@ -274,14 +274,13 @@ Messaggio: "{$text}"
 Risposta (solo SI o NO):
 PROMPT;
 
-    $requestData = [
-        'model' => OLLAMA_MODEL_LIGHT,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['temperature' => 0.1]),
-    ];
-
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+    $result = callOllamaChatViaQBert(
+        OLLAMA_MODEL_LIGHT,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['temperature' => 0.1]),
+        false,
+        QBertClient::PRIORITY_NORMAL
+    );
 
     if (!$result) {
         error_log("isHardwareOffer QBert error");
@@ -303,7 +302,6 @@ PROMPT;
  */
 function generateHardwareWarning($userName, $text) {
     $prompt = <<<PROMPT
-<|think|>
 Sei rootbot, il bot del circolo /root. Hai un carattere cinico e ironico come Bender di Futurama, ma sotto sotto ti stanno simpatici questi umani.
 
 Un utente ({$userName}) ha scritto questo messaggio nel gruppo:
@@ -322,14 +320,13 @@ Scrivi un messaggio che:
 Rispondi SOLO con il messaggio, senza preamboli:
 PROMPT;
 
-    $requestData = [
-        'model' => OLLAMA_MODEL,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.8]),
-    ];
-
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+    $result = callOllamaChatViaQBert(
+        OLLAMA_MODEL,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.8]),
+        false,
+        QBertClient::PRIORITY_NORMAL
+    );
 
     if (!$result) {
         error_log("generateHardwareWarning QBert error");

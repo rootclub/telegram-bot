@@ -88,15 +88,14 @@ function classifyIntent(string $message, int $chatID = 0): array {
 
     $prompt = buildClassifierPrompt($registry, $message, $recentContext);
 
-    $requestData = [
-        'model' => OLLAMA_MODEL_LIGHT,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['num_ctx' => 2048]),
-    ];
-
     $startTime = microtime(true);
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+    $result = callOllamaChatViaQBert(
+        OLLAMA_MODEL_LIGHT,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['num_ctx' => 2048]),
+        false,
+        QBertClient::PRIORITY_NORMAL
+    );
     $elapsed = round((microtime(true) - $startTime) * 1000);
 
     $logEntry = "[" . date('Y-m-d H:i:s') . "] classify ({$elapsed}ms)\n";

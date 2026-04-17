@@ -94,12 +94,18 @@ function callOllamaViaQBert($requestData, $priority = QBertClient::PRIORITY_NORM
  * @param string $priority
  * @return array|null  ['response' => string, 'thinking' => string, 'done_reason' => ..., 'raw' => <full>]
  */
-function callOllamaChatViaQBert(string $model, string $prompt, array $options = [], ?bool $think = null, $priority = QBertClient::PRIORITY_NORMAL) {
+function callOllamaChatViaQBert(string $model, string $prompt, array $options = [], ?bool $think = null, $priority = QBertClient::PRIORITY_NORMAL, ?string $system = null) {
     $qbert = getQBertClient();
+
+    $messages = [];
+    if ($system !== null && $system !== '') {
+        $messages[] = ['role' => 'system', 'content' => $system];
+    }
+    $messages[] = ['role' => 'user', 'content' => $prompt];
 
     $body = [
         'model'    => $model,
-        'messages' => [['role' => 'user', 'content' => $prompt]],
+        'messages' => $messages,
         'stream'   => false,
         'options'  => $options,
     ];
@@ -258,6 +264,68 @@ function callOllamaViaQBertWithTyping($requestData, $chatId, $priority = QBertCl
 }
 
 /**
+ * Versione di callOllamaChatViaQBert con refresh del typing indicator.
+ * Stessa shape di ritorno del wrapper chat normale.
+ */
+function callOllamaChatViaQBertWithTyping(string $model, string $prompt, int $chatId, array $options = [], ?bool $think = null, $priority = QBertClient::PRIORITY_NORMAL) {
+    $qbert = getQBertClient();
+
+    $body = [
+        'model'    => $model,
+        'messages' => [['role' => 'user', 'content' => $prompt]],
+        'stream'   => false,
+        'options'  => $options,
+    ];
+    if ($think !== null) {
+        $body['think'] = $think;
+    }
+
+    makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
+    $lastTypingTime = time();
+    $progress = function () use ($chatId, &$lastTypingTime) {
+        if ((time() - $lastTypingTime) >= 3) {
+            makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
+            $lastTypingTime = time();
+        }
+    };
+
+    $result = qbertPostWithProgress('ollama', '/api/chat', $body, $progress, $priority);
+
+    $json = null;
+    if (!$result['is_ticket']) {
+        $json = $result['json'] ?? null;
+    } else {
+        $ticketId = $result['ticket_id'];
+        $start = microtime(true);
+        $maxWait = 600.0;
+        while (true) {
+            if ((microtime(true) - $start) > $maxWait) return null;
+            if ((time() - $lastTypingTime) >= 3) {
+                makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
+                $lastTypingTime = time();
+            }
+            $ticket = $qbert->poll($ticketId);
+            if (!$ticket['found'] || $ticket['failed']) return null;
+            if ($ticket['done']) { $json = $ticket['json'] ?? null; break; }
+            usleep(1000000);
+        }
+    }
+
+    if (!is_array($json)) return null;
+    $msg = $json['message'] ?? [];
+    return [
+        'response'           => (string)($msg['content'] ?? ''),
+        'thinking'           => (string)($msg['thinking'] ?? ''),
+        'done'               => $json['done'] ?? null,
+        'done_reason'        => $json['done_reason'] ?? null,
+        'prompt_eval_count'  => $json['prompt_eval_count'] ?? null,
+        'eval_count'         => $json['eval_count'] ?? null,
+        'total_duration'     => $json['total_duration'] ?? null,
+        'raw'                => $json,
+    ];
+}
+
+/**
  * Classifica se un messaggio richiede una ricerca Wikipedia
  * e in caso positivo estrae il termine di ricerca.
  * Usa OLLAMA_MODEL_LIGHT per velocità.
@@ -281,15 +349,14 @@ Se è conversazione, opinione, saluto, domanda personale o non richiede Wikipedi
 Messaggio: "{$message}"
 PROMPT;
 
-    $requestData = [
-        'model' => OLLAMA_MODEL_LIGHT,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
-    ];
-
     $startTime = microtime(true);
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+    $result = callOllamaChatViaQBert(
+        OLLAMA_MODEL_LIGHT,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
+        false,
+        QBertClient::PRIORITY_NORMAL
+    );
     $elapsed = round((microtime(true) - $startTime) * 1000);
 
     // Log
@@ -810,7 +877,6 @@ CONV;
     }
 
     $prompt = <<<PROMPT
-<|think|>
 ### ISTRUZIONI ###
 {$instructions}
 
@@ -832,15 +898,15 @@ PROMPT;
     $logEntry .= $prompt . "\n";
     file_put_contents(dirname(__DIR__) . '/ai.log', $logEntry, FILE_APPEND);
 
-    $requestData = [
-        'model' => $model,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_GPU),
-    ];
-
-    // Chiama Ollama via QBert con typing refresh
-    $result = callOllamaViaQBertWithTyping($requestData, $chatID, QBertClient::PRIORITY_NORMAL);
+    // Chiama Ollama via QBert con typing refresh (/api/chat + think=false: Gemma 4 pattern)
+    $result = callOllamaChatViaQBertWithTyping(
+        $model,
+        $prompt,
+        $chatID,
+        ollamaOptions(OLLAMA_MODEL_GPU),
+        false,
+        QBertClient::PRIORITY_NORMAL
+    );
 
     if (!$result) {
         return "Si è verificato un errore durante la comunicazione con l'AI.";
@@ -883,15 +949,14 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout
 
     file_put_contents($logFile, "--- Ollama call via QBert: $label ---\n", FILE_APPEND);
 
-    $requestData = [
-        'model' => $model,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_GPU),
-    ];
-
     $startTime = time();
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_LAZY);
+    $result = callOllamaChatViaQBert(
+        $model,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_GPU),
+        false,
+        QBertClient::PRIORITY_LAZY
+    );
     $elapsed = time() - $startTime;
 
     if (!$result) {
@@ -945,7 +1010,6 @@ function _generateFinalSaluto($summaries, $oggi, $logFile) {
 
     $persona = rootbotPersona();
     $prompt = <<<PROMPT
-<|think|>
 {$persona}
 È sera e osservi quello che gli umani hanno detto oggi.
 
@@ -1011,7 +1075,6 @@ function _saluto($chatID, $daysAgo = 0) {
 
         $persona = rootbotPersona();
         $prompt = <<<PROMPT
-<|think|>
 {$persona}
 È sera e osservi quello che gli umani hanno detto oggi.
 
@@ -1169,7 +1232,6 @@ function _dj($chatID, $hoursAgo = 0) {
 
         $persona = rootbotPersona();
         $prompt = <<<PROMPT
-<|think|>
 ### ISTRUZIONI ###
 {$persona}
 Stai osservando il flusso di informazioni che passa nel gruppo e ogni tanto decidi di commentare, offrendo il tuo punto di vista non umano.
@@ -1205,7 +1267,6 @@ PROMPT;
 
         $persona = rootbotPersona();
         $prompt = <<<PROMPT
-<|think|>
 ### ISTRUZIONI ###
 {$persona}
 Stai osservando le conversazioni degli umani nel gruppo e ogni tanto decidi di intervenire, offrendo il tuo punto di vista non umano.
@@ -1230,15 +1291,14 @@ PROMPT;
 
     file_put_contents(dirname(__DIR__) . '/ai.log', "=== DJ REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
 
-    $requestData = [
-        'model' => $model,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_GPU),
-    ];
-
-    // Chiama Ollama via QBert (DJ è un job in background, priorità lazy)
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_LAZY);
+    // Chiama Ollama via QBert (DJ è un job in background, priorità lazy) - /api/chat + think=false
+    $result = callOllamaChatViaQBert(
+        $model,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_GPU),
+        false,
+        QBertClient::PRIORITY_LAZY
+    );
 
     if (!$result) {
         return "Errore AI: QBert call failed";
@@ -1526,14 +1586,13 @@ function fetchUrlContent($url) {
 function summarizeUrl($url, $title, $description) {
     $prompt = "Riassumi in 1-2 frasi brevi di cosa parla questa pagina web.\nTitolo: {$title}\nDescrizione: {$description}\nURL: {$url}\n\nRiassunto:";
 
-    $requestData = [
-        'model' => OLLAMA_MODEL_LIGHT,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
-    ];
-
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+    $result = callOllamaChatViaQBert(
+        OLLAMA_MODEL_LIGHT,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
+        false,
+        QBertClient::PRIORITY_NORMAL
+    );
 
     if (!$result) {
         return '';
@@ -1872,7 +1931,6 @@ function _suggerisci_comando($comandoErrato, $chatId = null) {
 
     $persona = rootbotPersona();
     $prompt = <<<PROMPT
-<|think|>
 ### ISTRUZIONI ###
 {$persona}
 Un utente ha digitato un comando che non riconosci.
@@ -1894,18 +1952,12 @@ Rispondi in modo breve, vai dritto al punto.
 Suggerisci il comando corretto. Se non riesci a capire cosa l'utente volesse fare, elenca i comandi più comuni. Massimo 3-4 frasi.
 PROMPT;
 
-    $requestData = [
-        'model' => $model,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => ollamaOptions(OLLAMA_MODEL_GPU),
-    ];
-
-    // Chiama Ollama via QBert con typing refresh se abbiamo chatId
+    // /api/chat + think=false (Gemma 4 pattern), con typing refresh se abbiamo chatId
+    $options = ollamaOptions(OLLAMA_MODEL_GPU);
     if ($chatId) {
-        $result = callOllamaViaQBertWithTyping($requestData, $chatId, QBertClient::PRIORITY_NORMAL);
+        $result = callOllamaChatViaQBertWithTyping($model, $prompt, (int)$chatId, $options, false, QBertClient::PRIORITY_NORMAL);
     } else {
-        $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_NORMAL);
+        $result = callOllamaChatViaQBert($model, $prompt, $options, false, QBertClient::PRIORITY_NORMAL);
     }
 
     if (!$result) {

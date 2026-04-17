@@ -48,12 +48,13 @@ L'utente si riferisce a: "{$riferimento}"
 Rispondi SOLO con il numero dell'immagine piu' pertinente (es. "3"), o "0" se nessuna corrisponde.
 PROMPT;
 
-            $matchResult = callOllamaViaQBert([
-                'model' => OLLAMA_MODEL_LIGHT,
-                'prompt' => $matchPrompt,
-                'stream' => false,
-                'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
-            ], QBertClient::PRIORITY_NORMAL);
+            $matchResult = callOllamaChatViaQBert(
+                OLLAMA_MODEL_LIGHT,
+                $matchPrompt,
+                ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
+                false,
+                QBertClient::PRIORITY_NORMAL
+            );
 
             $matchResponse = stripThinkingTags($matchResult['response'] ?? '');
 

@@ -108,9 +108,7 @@ return [
             $personaSection = "\n\nThe user is asking for a depiction of \"rootbot\". Here is rootbot's personality:\n" . rootbotPersona() . "\nTranslate this personality into visual elements for the image prompt.";
         }
 
-        $enhanceResult = callOllamaViaQBert([
-            'model' => OLLAMA_MODEL_LIGHT,
-            'system' => <<<SYS
+        $systemPrompt = <<<SYS
 You are an expert image prompt engineer. Your task:
 1. Read the user's Italian image request and the recent chat context
 2. If the request references a previous image (e.g. "make another one", "same but with...", "change X to Y"), reconstruct the FULL description by combining the original request with the modifications
@@ -119,11 +117,16 @@ You are an expert image prompt engineer. Your task:
 5. Add artistic details: lighting, style, mood, composition, colors
 6. Keep it concise (max 100 words)
 7. Output ONLY the final English prompt, nothing else{$personaSection}
-SYS,
-            'prompt' => $italianPrompt . $contextSection,
-            'stream' => false,
-            'options' => ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
-        ], QBertClient::PRIORITY_NORMAL);
+SYS;
+
+        $enhanceResult = callOllamaChatViaQBert(
+            OLLAMA_MODEL_LIGHT,
+            $italianPrompt . $contextSection,
+            ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
+            false,
+            QBertClient::PRIORITY_NORMAL,
+            $systemPrompt
+        );
 
         $englishPrompt = trim(stripThinkingTags($enhanceResult['response'] ?? ''));
         if ($englishPrompt === '') {

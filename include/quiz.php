@@ -21,29 +21,19 @@ function callOllamaQuiz($prompt, $model, $useGpu, $logFile, $label = 'quiz', $ti
     file_put_contents($logFile, "\n[" . date('Y-m-d H:i:s') . "] --- $label (model: $model, $gpuLabel) ---\n", FILE_APPEND);
     file_put_contents($logFile, "PROMPT:\n$prompt\n", FILE_APPEND);
 
-    // Abilita reasoning per il modello principale (26b)
-    if ($model === OLLAMA_QUIZ_GENERATOR) {
-        $prompt = "<|think|>\n" . $prompt;
-    }
-
-    $requestData = [
-        'model' => $model,
-        'prompt' => $prompt,
-        'stream' => false,
-        'options' => [
-            'temperature' => OLLAMA_TEMPERATURE,
-            'top_p' => OLLAMA_TOP_P,
-            'top_k' => OLLAMA_TOP_K,
-        ]
+    $options = [
+        'temperature' => OLLAMA_TEMPERATURE,
+        'top_p' => OLLAMA_TOP_P,
+        'top_k' => OLLAMA_TOP_K,
     ];
-
-    // Imposta GPU o CPU
     if (!$useGpu) {
-        $requestData['options']['num_gpu'] = 0;
+        $options['num_gpu'] = 0;
     }
 
     $startTime = time();
-    $result = callOllamaViaQBert($requestData, QBertClient::PRIORITY_LAZY);
+    // /api/chat + think=false (Gemma 4 pattern). Il reasoning via <|think|> nel prompt
+    // era il vecchio modo di attivarlo su /api/generate ma causava response vuote.
+    $result = callOllamaChatViaQBert($model, $prompt, $options, false, QBertClient::PRIORITY_LAZY);
     $elapsed = time() - $startTime;
 
     file_put_contents($logFile, "[$label] QBert call, time: {$elapsed}s\n", FILE_APPEND);
