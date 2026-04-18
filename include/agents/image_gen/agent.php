@@ -5,25 +5,7 @@
  */
 require_once dirname(__DIR__, 2) . '/logger.php';
 
-return [
-    'id' => 'image_gen',
-    'description' => "L'utente chiede di generare, creare, disegnare o immaginare un'immagine, una foto, un disegno, un'illustrazione (es. 'genera un'immagine di...', 'disegna un gatto', 'fammi vedere un tramonto', 'crea un'illustrazione', 'immagina...')",
-    'parameters' => [
-        'prompt' => "Descrizione dettagliata dell'immagine da generare, in italiano, come richiesto dall'utente",
-        'formato' => "Formato dell'immagine SE esplicitamente richiesto: 'landscape' (orizzontale/panorama), 'portrait' (verticale/ritratto) o 'square' (quadrato). Se l'utente non specifica il formato, usa 'square'",
-    ],
-    'sends_own_response' => true,
-    'schema' => function (SQLite3 $db): void {
-        $db->exec("CREATE TABLE IF NOT EXISTS image_gen_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            timestamp INTEGER NOT NULL
-        )");
-        $db->exec("CREATE INDEX IF NOT EXISTS idx_image_gen_user ON image_gen_usage(user_id, timestamp)");
-        $oneHourAgo = time() - 3600;
-        $db->exec("DELETE FROM image_gen_usage WHERE timestamp < {$oneHourAgo}");
-    },
-    'handler' => function (array $ctx, array $params): ?array {
+$imageGenHandler = function (array $ctx, array $params): ?array {
         $logFile = logPath('image_gen');
         $log = function (string $msg) use ($logFile) {
             file_put_contents($logFile, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);
@@ -260,5 +242,52 @@ SYS;
         $stmt->execute();
 
         return ['handled' => true];
+};
+
+return [
+    'id' => 'image_gen',
+    'description' => "L'utente chiede di generare, creare, disegnare o immaginare un'immagine, una foto, un disegno, un'illustrazione (es. 'genera un'immagine di...', 'disegna un gatto', 'fammi vedere un tramonto', 'crea un'illustrazione', 'immagina...')",
+    'parameters' => [
+        'prompt' => "Descrizione dettagliata dell'immagine da generare, in italiano, come richiesto dall'utente",
+        'formato' => "Formato dell'immagine SE esplicitamente richiesto: 'landscape' (orizzontale/panorama), 'portrait' (verticale/ritratto) o 'square' (quadrato). Se l'utente non specifica il formato, usa 'square'",
+    ],
+    'sends_own_response' => true,
+    'help' => "Generazione immagini:
+/genera [descrizione] - genera un'immagine dalla descrizione (es: /genera un gatto astronauta)
+Puoi aggiungere 'landscape' o 'portrait' per il formato (default: quadrato)
+Puoi anche chiedere: 'rootbot disegna un tramonto sul mare'
+Limite: 6 immagini/ora per utente",
+    'schema' => function (SQLite3 $db): void {
+        $db->exec("CREATE TABLE IF NOT EXISTS image_gen_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_image_gen_user ON image_gen_usage(user_id, timestamp)");
+        $oneHourAgo = time() - 3600;
+        $db->exec("DELETE FROM image_gen_usage WHERE timestamp < {$oneHourAgo}");
     },
+    'handler' => $imageGenHandler,
+    'commands' => [
+        [
+            // /genera [descrizione] [landscape|portrait|orizzontale|verticale]
+            'pattern' => '/^\/genera(?:@rootbotbot)?(?:\s+(.*))?$/ui',
+            'handler' => function (array $ctx, array $matches) use ($imageGenHandler): ?array {
+                $prompt = trim($matches[1] ?? '');
+                if ($prompt === '') {
+                    return ['response' => "Uso: /genera [descrizione immagine]\nEs: /genera un gatto astronauta nello spazio"];
+                }
+                $formato = 'square';
+                if (preg_match('/\b(landscape|portrait|orizzontale|verticale)\b/i', $prompt, $fm)) {
+                    $formato = match (strtolower($fm[1])) {
+                        'landscape', 'orizzontale' => 'landscape',
+                        'portrait',  'verticale'   => 'portrait',
+                        default                    => 'square',
+                    };
+                    $prompt = trim(preg_replace('/\b' . preg_quote($fm[0], '/') . '\b/i', '', $prompt));
+                }
+                return $imageGenHandler($ctx, ['prompt' => $prompt, 'formato' => $formato]);
+            },
+        ],
+    ],
 ];

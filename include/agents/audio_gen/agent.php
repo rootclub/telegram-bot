@@ -8,24 +8,7 @@
  */
 require_once dirname(__DIR__, 2) . '/logger.php';
 
-return [
-    'id' => 'audio_gen',
-    'description' => "L'utente chiede di generare, comporre, creare o scrivere un brano musicale, una canzone, un pezzo, una musica, una sigla, una ballata (es. 'crea un brano rock', 'componi una canzone su...', 'fammi un pezzo lo-fi', 'scrivi una ballata triste', 'genera una sigla strumentale')",
-    'parameters' => [
-        'prompt' => "Descrizione del brano richiesto in italiano: genere, mood, tema del testo, strumenti, voce, ecc. — tutto ciò che l'utente specifica",
-    ],
-    'sends_own_response' => true,
-    'schema' => function (SQLite3 $db): void {
-        $db->exec("CREATE TABLE IF NOT EXISTS audio_gen_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            timestamp INTEGER NOT NULL
-        )");
-        $db->exec("CREATE INDEX IF NOT EXISTS idx_audio_gen_user ON audio_gen_usage(user_id, timestamp)");
-        $oneHourAgo = time() - 3600;
-        $db->exec("DELETE FROM audio_gen_usage WHERE timestamp < {$oneHourAgo}");
-    },
-    'handler' => function (array $ctx, array $params): ?array {
+$audioGenHandler = function (array $ctx, array $params): ?array {
         $logFile = logPath('audio_gen');
         $log = function (string $msg) use ($logFile) {
             file_put_contents($logFile, '[' . date('Y-m-d H:i:s') . '] ' . $msg . "\n", FILE_APPEND);
@@ -62,7 +45,7 @@ return [
 
             $duration = random_int(120, 210);
             if ($durRaw !== null && preg_match('/\d+/', $durRaw, $m)) {
-                $duration = max(90, min(240, (int)$m[0]));
+                $duration = max(10, min(210, (int)$m[0]));
             }
 
             if (!$key) {
@@ -255,7 +238,7 @@ Seguendo questa guida componi un brano musicale, senza preamboli e conclusioni, 
 <codice ISO a 2 lettere: it, en, es, fr, de, ja, ... — deve coincidere con la lingua del testo>
 
 #DURATION:
-<durata in secondi, intero tra 90 e 240, scelto in base alla struttura del brano>
+<durata in secondi, intero tra 10 e 210. Se l'utente specifica una durata (es. "jingle di 15 secondi", "brano di 3 minuti") RISPETTALA, altrimenti scegli in base alla struttura del brano>
 SYS;
 
         $llmResult = callOllamaChatViaQBert(
@@ -418,5 +401,42 @@ SYS;
 
         $log('Audio sent successfully, flow complete');
         return ['handled' => true];
+};
+
+return [
+    'id' => 'audio_gen',
+    'description' => "L'utente chiede di generare, comporre, creare o scrivere un brano musicale, una canzone, un pezzo, una musica, una sigla, una ballata (es. 'crea un brano rock', 'componi una canzone su...', 'fammi un pezzo lo-fi', 'scrivi una ballata triste', 'genera una sigla strumentale')",
+    'parameters' => [
+        'prompt' => "Descrizione del brano richiesto in italiano: genere, mood, tema del testo, strumenti, voce, ecc. — tutto ciò che l'utente specifica",
+    ],
+    'sends_own_response' => true,
+    'help' => "Generazione musicale:
+/componi [descrizione brano] - compone un brano musicale (es: /componi un lo-fi triste per studiare)
+Puoi specificare genere, mood, strumenti, voce, tema del testo, durata (es: 'jingle di 15 secondi')
+Puoi anche chiedere: 'rootbot componi una ballata rock in italiano'
+Limite: 6 brani/ora per utente",
+    'schema' => function (SQLite3 $db): void {
+        $db->exec("CREATE TABLE IF NOT EXISTS audio_gen_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_audio_gen_user ON audio_gen_usage(user_id, timestamp)");
+        $oneHourAgo = time() - 3600;
+        $db->exec("DELETE FROM audio_gen_usage WHERE timestamp < {$oneHourAgo}");
     },
+    'handler' => $audioGenHandler,
+    'commands' => [
+        [
+            // /componi [descrizione brano]
+            'pattern' => '/^\/componi(?:@rootbotbot)?(?:\s+(.*))?$/ui',
+            'handler' => function (array $ctx, array $matches) use ($audioGenHandler): ?array {
+                $prompt = trim($matches[1] ?? '');
+                if ($prompt === '') {
+                    return ['response' => "Uso: /componi [descrizione brano]\nEs: /componi un lo-fi triste per studiare"];
+                }
+                return $audioGenHandler($ctx, ['prompt' => $prompt]);
+            },
+        ],
+    ],
 ];

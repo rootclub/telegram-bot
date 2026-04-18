@@ -16,6 +16,14 @@ return [
         'topic' => "L'argomento del quiz se specificato dall'utente, stringa vuota se non specificato",
     ],
     'sends_own_response' => true,
+    'help' => "Quiz e trivia:
+/quiz - lancia un quiz su argomento casuale
+/quiz [argomento] - quiz su argomento specifico (es: /quiz storia)
+/argomenti_quiz - mostra argomenti predefiniti disponibili
+/classifica_quiz - classifica dei migliori giocatori
+/aggiungi_argomento [nome]|[descrizione] - aggiunge argomento con descrizione (solo admin)
+/aggiungi_argomento [arg1], [arg2], [arg3] - aggiunge piu argomenti (solo admin)
+Puoi anche chiedere: 'rootbot fai un quiz su tecnologia'",
     'schema' => function (SQLite3 $db): void {
         $db->exec("CREATE TABLE IF NOT EXISTS quiz_topics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,4 +105,64 @@ return [
         }
         return ['handled' => true];
     },
+    'commands' => [
+        [
+            // /quiz o /quiz [argomento]
+            'pattern' => '/^\/quiz(?:@rootbotbot)?(?:\s+(.*))?$/ui',
+            'handler' => function (array $ctx, array $matches): ?array {
+                $error = handleQuizCommand($ctx['message'], $ctx['chatID'], $ctx['fromId'], $ctx['firstName']);
+                return $error !== null ? ['response' => $error] : ['handled' => true];
+            },
+        ],
+        [
+            'pattern' => '/^\/argomenti_quiz(?:@rootbotbot)?$/ui',
+            'handler' => function (array $ctx, array $matches): ?array {
+                $messages = listQuizTopics();
+                foreach ($messages as $msg) {
+                    sendTelegramMessage($ctx['chatID'], $msg);
+                }
+                return ['handled' => true];
+            },
+        ],
+        [
+            'pattern' => '/^\/classifica_quiz(?:@rootbotbot)?$/ui',
+            'handler' => function (array $ctx, array $matches): ?array {
+                return ['response' => getQuizLeaderboard($ctx['chatID'])];
+            },
+        ],
+        [
+            // /aggiungi_argomento nome|descrizione  oppure lista: arg1, arg2, arg3
+            'pattern' => '/^\/aggiungi_argomento(?:@rootbotbot)?\s+(.+)$/ui',
+            'handler' => function (array $ctx, array $matches): ?array {
+                if (!isQuizAdmin($ctx['chatID'], $ctx['fromId'])) {
+                    return ['response' => "Solo gli admin possono aggiungere argomenti quiz."];
+                }
+                $input = trim($matches[1]);
+
+                // Lista di argomenti separata da virgola (senza pipe = no descrizioni)
+                if (strpos($input, ',') !== false && strpos($input, '|') === false) {
+                    $topics = array_filter(array_map('trim', explode(',', $input)));
+                    $added = [];
+                    $failed = [];
+                    foreach ($topics as $t) {
+                        if (addQuizTopic($t, null)) { $added[] = $t; }
+                        else                        { $failed[] = $t; }
+                    }
+                    $resp = '';
+                    if (!empty($added))  { $resp .= "Aggiunti: " . implode(', ', $added); }
+                    if (!empty($failed)) { $resp .= ($resp ? "\n" : '') . "Gia esistenti: " . implode(', ', $failed); }
+                    return ['response' => $resp];
+                }
+
+                // Singolo argomento: nome|descrizione
+                $parts = explode('|', $input, 2);
+                $newTopic = trim($parts[0]);
+                $desc = isset($parts[1]) ? trim($parts[1]) : null;
+                if (addQuizTopic($newTopic, $desc)) {
+                    return ['response' => "Argomento '$newTopic' aggiunto con successo!"];
+                }
+                return ['response' => "Argomento gia esistente o errore."];
+            },
+        ],
+    ],
 ];

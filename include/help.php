@@ -8,7 +8,7 @@ function _start($chatType){
 }
 
 function _help(){
-	return "Ecco cosa posso fare:
+	$core = "Ecco cosa posso fare:
 /info - Informazioni sul gruppo
 /regole - Mostra le regole del gruppo
 @root seguito da un messaggio per parlare con me (usa Ollama, gira sul PC di Lamberto quindi quando è spento non rispondo)
@@ -39,22 +39,21 @@ Posso anche gestire eventi speciali (corsi, cene, talk):
 /annullo - elimini la tua partecipazione o ospite
 /annullo_ospite - rimuovi un ospite che hai aggiunto
 /modifica_evento - modifica descrizione, data/ora o costo di un evento (solo admin)
-/chiudi_evento - elimina un evento concluso (solo admin)
+/chiudi_evento - elimina un evento concluso (solo admin)";
 
-Quiz e trivia:
-/quiz - lancia un quiz su argomento casuale
-/quiz [argomento] - quiz su argomento specifico (es: /quiz storia)
-/argomenti_quiz - mostra argomenti predefiniti disponibili
-/classifica_quiz - classifica dei migliori giocatori
-/aggiungi_argomento [nome]|[descrizione] - aggiunge argomento con descrizione (solo admin)
-/aggiungi_argomento [arg1], [arg2], [arg3] - aggiunge piu argomenti (solo admin)
-Puoi anche chiedere: 'rootbot fai un quiz su tecnologia'
+	// Sezioni contribuite dagli agenti via campo 'help' nella declaration
+	$agentSections = [];
+	$registry = loadAgentRegistry();
+	foreach ($registry['agents'] as $agent) {
+		if (!empty($agent['help']) && is_string($agent['help'])) {
+			$agentSections[] = trim($agent['help']);
+		}
+	}
 
-Generazione immagini:
-/genera [descrizione] - genera un'immagine dalla descrizione (es: /genera un gatto astronauta)
-Puoi aggiungere 'landscape' o 'portrait' per il formato (default: quadrato)
-Puoi anche chiedere: 'rootbot disegna un tramonto sul mare'
-Limite: 6 immagini/ora per utente";
+	if (!empty($agentSections)) {
+		$core .= "\n\n" . implode("\n\n", $agentSections);
+	}
+	return $core;
 }
 
 function _info($chatID, $chatType){
