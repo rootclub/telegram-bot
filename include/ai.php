@@ -47,7 +47,10 @@ function ollamaOptions(bool $useGpu, array $extra = []): array {
 function getQBertClient() {
     static $qbert = null;
     if ($qbert === null) {
-        $qbert = new QBertClient(QBERT_URL, timeout: 120.0, maxWait: 600.0, appName: BOT_NAME);
+        // timeout cURL alzato: con 120s il cURL chiudeva la connessione prima che QBert
+        // restituisse sync o staccasse un ticket (visto su /view dei GLB ComfyUI).
+        // Niente proxy/Cloudflare in mezzo, quindi possiamo permettercelo.
+        $qbert = new QBertClient(QBERT_URL, timeout: 600.0, maxWait: 600.0, appName: BOT_NAME);
     }
     return $qbert;
 }

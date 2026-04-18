@@ -190,42 +190,10 @@ if (isset($update['message'])) {
         markAsReplied($groupId, $message['message_id']);
     }
 
-    // Se l'utente fa reply a un'immagine inviata in precedenza con una domanda
-    // rivolta al bot, rilanciamo l'analisi vision usando la domanda come prompt
-    // (invece di affidarci all'analisi generica già salvata nel contesto).
-    if ($mentionsBot
-        && !isset($message['photo'])
-        && !(isset($message['document']) && isImageDocument($message['document']))
-        && isset($message['reply_to_message'])) {
-
-        $replyTo = $message['reply_to_message'];
-        $replyFileId = null;
-        if (isset($replyTo['photo'])) {
-            $replyPhotos = $replyTo['photo'];
-            $replyFileId = $replyPhotos[count($replyPhotos) - 1]['file_id'];
-        } elseif (isset($replyTo['document']) && isImageDocument($replyTo['document'])) {
-            $replyFileId = $replyTo['document']['file_id'];
-        }
-
-        if ($replyFileId !== null && !empty(trim($messageText))) {
-            file_put_contents(logPath('debug'), "=== REPLY TO IMAGE: rilancio vision con domanda ===\n", FILE_APPEND);
-            $question = trim($messageText);
-            $imageAnswer = analyzeImage($replyFileId, $question, $groupId);
-
-            if ($imageAnswer) {
-                sendTelegramMessage($groupId, $imageAnswer, [
-                    'reply_to_message_id' => $message['message_id'],
-                ]);
-                saveMessageToContext($groupId, 'rootbot', "[risposta su immagine: $imageAnswer]");
-                // Aggiorna descrizione nel log immagini
-                saveImageLog($groupId, $userId, $userName, $replyFileId, $imageAnswer);
-            }
-
-            return;
-        }
-    }
-
     // POI: Processa il messaggio (comandi, AI, ecc.)
+    // Le reply a un'immagine col bot menzionato sono instradate dal dispatcher
+    // come qualsiasi altro messaggio: gli agenti che accettano foto in input
+    // (image_query, 3d_gen, ...) leggono il file_id da ctx['raw']['reply_to_message'].
     processMessage($message);
 } elseif (isset($update['edited_message'])) {
     // Gestisce i messaggi editati solo se menzionano il bot (o chat privata) e non abbiamo già risposto

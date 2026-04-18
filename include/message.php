@@ -109,6 +109,41 @@ function processMessage($message) {
         return;
     }
 
+    // Slash commands dichiarati dagli agenti (plug-and-play: se l'agente viene
+    // rimosso, il suo comando sparisce automaticamente).
+    if (!empty($text) && strpos($text, '/') === 0) {
+        $agentCmdCtx = [
+            'chatID' => $chatID,
+            'chatType' => $chatType,
+            'message' => $text,
+            'userName' => $firstName,
+            'fromId' => $fromId,
+            'firstName' => $firstName,
+            'messageId' => $message['message_id'],
+        ];
+        $agentCmdResult = dispatchAgentCommand($text, $agentCmdCtx);
+        if ($agentCmdResult !== null) {
+            if (!empty($agentCmdResult['response'])) {
+                $payload = $agentCmdResult['response'] instanceof TelegramHtml
+                    ? $agentCmdResult['response']
+                    : new TelegramHtml((string)$agentCmdResult['response']);
+                $options = [];
+                if (TTS_ENABLED) {
+                    $options['reply_markup'] = json_encode([
+                        'inline_keyboard' => [[
+                            ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
+                        ]]
+                    ]);
+                }
+                if ($chatType !== 'private') {
+                    $options['reply_to_message_id'] = $message['message_id'];
+                }
+                sendTelegramMessage($chatID, $payload, $options);
+            }
+            return;
+        }
+    }
+
     //$profanity_response = handle_profanity($message);
     $profanity_response = null;
     if ($profanity_response !== null) {
@@ -221,102 +256,6 @@ function processMessage($message) {
     } elseif ($text == '/elimina_asporto') {
         $response = elimina_pappatoia($chatID, $fromId);
 
-    // === COMANDI QUIZ ===
-    } elseif (preg_match('/^\/quiz(?:@rootbotbot)?(?:\s+(.*))?$/ui', $text, $quizMatches)) {
-        // /quiz o /quiz [argomento]
-        $quizError = handleQuizCommand($text, $chatID, $fromId, $firstName);
-        if ($quizError !== null) {
-            $response = $quizError;
-        }
-        // Se null, quiz inviato con successo, nessuna risposta testuale
-
-    } elseif ($text == '/argomenti_quiz' || $text == '/argomenti_quiz@rootbotbot') {
-        $messages = listQuizTopics();
-        foreach ($messages as $msg) {
-            sendTelegramMessage($chatID, $msg);
-        }
-
-    } elseif ($text == '/classifica_quiz' || $text == '/classifica_quiz@rootbotbot') {
-        $response = getQuizLeaderboard($chatID);
-
-    } elseif (preg_match('/^\/aggiungi_argomento(?:@rootbotbot)?\s+(.+)$/ui', $text, $topicMatches)) {
-        // Comando admin per aggiungere topic (supporta lista: arg1, arg2, arg3)
-        if (isQuizAdmin($chatID, $fromId)) {
-            $input = trim($topicMatches[1]);
-
-            // Se contiene virgola e non pipe, è una lista di argomenti
-            if (strpos($input, ',') !== false && strpos($input, '|') === false) {
-                $topics = array_map('trim', explode(',', $input));
-                $topics = array_filter($topics);
-                $added = [];
-                $failed = [];
-
-                foreach ($topics as $t) {
-                    if (addQuizTopic($t, null)) {
-                        $added[] = $t;
-                    } else {
-                        $failed[] = $t;
-                    }
-                }
-
-                $response = "";
-                if (!empty($added)) {
-                    $response .= "Aggiunti: " . implode(', ', $added);
-                }
-                if (!empty($failed)) {
-                    $response .= ($response ? "\n" : "") . "Gia esistenti: " . implode(', ', $failed);
-                }
-            } else {
-                // Singolo argomento: nome|descrizione
-                $parts = explode('|', $input, 2);
-                $newTopic = trim($parts[0]);
-                $desc = isset($parts[1]) ? trim($parts[1]) : null;
-
-                if (addQuizTopic($newTopic, $desc)) {
-                    $response = "Argomento '$newTopic' aggiunto con successo!";
-                } else {
-                    $response = "Argomento gia esistente o errore.";
-                }
-            }
-        } else {
-            $response = "Solo gli admin possono aggiungere argomenti quiz.";
-        }
-
-    // /genera [descrizione] — genera immagine via ComfyUI
-    } elseif (preg_match('/^\/genera(?:@rootbotbot)?(?:\s+(.*))?$/ui', $text, $genMatches)) {
-        $genPrompt = trim($genMatches[1] ?? '');
-        if ($genPrompt === '') {
-            $response = "Uso: /genera [descrizione immagine]\nEs: /genera un gatto astronauta nello spazio";
-        } else {
-            // Estrai formato se presente in coda (es. "un gatto landscape")
-            $genFormato = 'square';
-            if (preg_match('/\b(landscape|portrait|orizzontale|verticale)\b/i', $genPrompt, $fmtMatch)) {
-                $genFormato = match (strtolower($fmtMatch[1])) {
-                    'landscape', 'orizzontale' => 'landscape',
-                    'portrait', 'verticale' => 'portrait',
-                    default => 'square',
-                };
-                $genPrompt = trim(preg_replace('/\b' . preg_quote($fmtMatch[0], '/') . '\b/i', '', $genPrompt));
-            }
-            $messageContext = [
-                'chatID' => $chatID,
-                'chatType' => $chatType,
-                'message' => $genPrompt,
-                'userName' => $firstName,
-                'fromId' => $fromId,
-                'firstName' => $firstName,
-                'messageId' => $message['message_id'],
-            ];
-            // Carica e invoca direttamente l'agente image_gen
-            $registry = loadAgentRegistry();
-            $agent = $registry['agents']['image_gen'];
-            $result = ($agent['handler'])($messageContext, ['prompt' => $genPrompt, 'formato' => $genFormato]);
-            if ($result && !empty($result['response'])) {
-                $response = $result['response'];
-            }
-            // Se handled=true, la foto è già stata inviata
-        }
-
     // Dispatcher modulare: menzione bot, reply al bot, o chat privata
     } elseif (preg_match('/@rootbotbot\b/', $text) || preg_match('/@rootbot\b/', $text) || preg_match('/@root\b/', $text) || preg_match('/@bot\b/', $text) || preg_match('/\brootbotbot\b/i', $text) || preg_match('/\brootbot\b/i', $text) || $isReplyToBot || ($chatType == 'private' && !empty($text) && !preg_match('/^\//', $text))) {
         $messageContext = [
@@ -327,6 +266,7 @@ function processMessage($message) {
             'fromId' => $fromId,
             'firstName' => $firstName,
             'messageId' => $message['message_id'],
+            'raw' => $message,
         ];
         dispatchIntent($text, $messageContext);
         return;

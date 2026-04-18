@@ -52,9 +52,48 @@ function initAgentSchemas(SQLite3 $db): void {
 }
 
 /**
+ * Scorre i comandi slash dichiarati dagli agenti e, se uno matcha, esegue l'handler.
+ *
+ * Ogni agente può dichiarare un campo opzionale 'commands' come array di
+ * ['pattern' => regex, 'handler' => callable]. L'handler riceve ($ctx, $matches)
+ * e ritorna null, ['handled' => true] o ['response' => '...'].
+ *
+ * @return array|null  Il risultato dell'handler se un comando ha matchato, null altrimenti.
+ */
+function dispatchAgentCommand(string $text, array $ctx): ?array {
+    $registry = loadAgentRegistry();
+    $logFile = logPath('dispatcher');
+
+    foreach ($registry['agents'] as $id => $agent) {
+        if (empty($agent['commands']) || !is_array($agent['commands'])) continue;
+        foreach ($agent['commands'] as $cmd) {
+            $pattern = $cmd['pattern'] ?? null;
+            $handler = $cmd['handler'] ?? null;
+            if (!$pattern || !is_callable($handler)) continue;
+
+            if (preg_match($pattern, $text, $matches)) {
+                file_put_contents(
+                    $logFile,
+                    '[' . date('Y-m-d H:i:s') . '] slash cmd matched: agent=' . $id .
+                    ' pattern=' . $pattern . ' text=' . substr($text, 0, 100) . "\n\n",
+                    FILE_APPEND
+                );
+                try {
+                    return $handler($ctx, $matches) ?? ['handled' => true];
+                } catch (\Throwable $e) {
+                    error_log("[dispatcher] Slash handler error (agent={$id}): " . $e->getMessage());
+                    return ['response' => "Si è verificato un errore durante l'elaborazione del comando."];
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/**
  * Costruisce dinamicamente il prompt del classificatore dalle dichiarazioni degli agenti
  */
-function buildClassifierPrompt(array $registry, string $message, string $recentContext = ''): string {
+function buildClassifierPrompt(array $registry, string $message, string $recentContext = '', string $situationHint = ''): string {
     $intentList = '';
     $paramInstructions = '';
     $intentIds = [];
@@ -78,13 +117,18 @@ function buildClassifierPrompt(array $registry, string $message, string $recentC
         $contextSection = "ULTIMI MESSAGGI IN CHAT (per contesto):\n{$recentContext}\n\n";
     }
 
+    $situationSection = '';
+    if (!empty($situationHint)) {
+        $situationSection = "SITUAZIONE: {$situationHint}\n\n";
+    }
+
     return <<<PROMPT
 Analizza questo messaggio e classifica l'intento dell'utente. Rispondi SOLO con JSON valido, nient'altro.
 
 INTENTI POSSIBILI:
 {$intentList}
 {$paramInstructions}
-{$contextSection}Formato risposta:
+{$situationSection}{$contextSection}Formato risposta:
 {"intent": "<uno tra {$validIntents}>", "params": {<parametri estratti o oggetto vuoto>}}
 
 Messaggio: "{$message}"
@@ -95,7 +139,7 @@ PROMPT;
  * Classifica l'intento del messaggio tramite LLM leggero
  * Ritorna ['intent' => string, 'params' => array]
  */
-function classifyIntent(string $message, int $chatID = 0): array {
+function classifyIntent(string $message, int $chatID = 0, string $situationHint = ''): array {
     $registry = loadAgentRegistry();
     $defaultIntent = $registry['default'] ?? 'chat';
     $logFile = logPath('dispatcher');
@@ -106,7 +150,7 @@ function classifyIntent(string $message, int $chatID = 0): array {
         $recentContext = getChatContext($chatID, 1, 3);
     }
 
-    $prompt = buildClassifierPrompt($registry, $message, $recentContext);
+    $prompt = buildClassifierPrompt($registry, $message, $recentContext, $situationHint);
 
     $startTime = microtime(true);
     $result = callOllamaChatViaQBert(
@@ -161,7 +205,21 @@ function classifyIntent(string $message, int $chatID = 0): array {
  */
 function dispatchIntent(string $message, array $ctx): void {
     $registry = loadAgentRegistry();
-    $classification = classifyIntent($message, $ctx['chatID']);
+
+    // Hint per il classifier: se il messaggio è una reply a un'immagine, glielo
+    // diciamo esplicitamente così "che colore?" / "trasformala in 3D" diventano
+    // riconoscibili anche senza che il testo nomini l'immagine.
+    $situationHint = '';
+    $raw = $ctx['raw'] ?? null;
+    if ($raw && isset($raw['reply_to_message'])) {
+        $replyTo = $raw['reply_to_message'];
+        if (isset($replyTo['photo'])
+            || (isset($replyTo['document']) && function_exists('isImageDocument') && isImageDocument($replyTo['document']))) {
+            $situationHint = "L'utente sta rispondendo a un'immagine inviata in precedenza.";
+        }
+    }
+
+    $classification = classifyIntent($message, $ctx['chatID'], $situationHint);
 
     $intentId = $classification['intent'];
     $params = $classification['params'];
