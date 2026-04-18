@@ -398,41 +398,26 @@ function processMessage($message) {
 
     // Invia la risposta solo se è stata impostata
     if ($response !== null) {
-        // In chat privata non serve il reply, in gruppo sì per chiarezza
-        $messageParams = [
-            'chat_id' => $chatID,
-            'text' => $response,
-            'parse_mode' => 'HTML'
-        ];
+        // Gli handler producono già output "fidato" con parse_mode=HTML (alcuni
+        // usano tag intenzionali, altri no). Wrappare in TelegramHtml preserva
+        // il comportamento storico: niente escape automatico, il wrapper fa
+        // solo retry (reply_to mancante, parse entities, 429) + truncation.
+        // TODO: audit handler per handler per distinguere HTML-trusted vs plain
+        // (es. _suggerisci_comando ritorna output LLM, andrebbe string plain).
+        $payload = $response instanceof TelegramHtml ? $response : new TelegramHtml((string)$response);
+        $options = [];
         if (TTS_ENABLED) {
-            $messageParams['reply_markup'] = json_encode([
+            $options['reply_markup'] = json_encode([
                 'inline_keyboard' => [[
                     ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
                 ]]
             ]);
         }
         if ($chatType !== 'private') {
-            $messageParams['reply_to_message_id'] = $message['message_id'];
+            $options['reply_to_message_id'] = $message['message_id'];
         }
 
-        $result = makeAPIRequest('sendMessage', $messageParams);
-
-        // Retry: messaggio originale eliminato
-        if (!$result || !$result['ok']) {
-            $errCode = $result['error_code'] ?? 0;
-            $errDesc = $result['description'] ?? '';
-
-            if ($errCode == 400 && strpos($errDesc, 'message to be replied not found') !== false) {
-                unset($messageParams['reply_to_message_id']);
-                $result = makeAPIRequest('sendMessage', $messageParams);
-            }
-
-            // Retry: HTML malformato nella risposta
-            if (!$result || !$result['ok']) {
-                unset($messageParams['parse_mode']);
-                makeAPIRequest('sendMessage', $messageParams);
-            }
-        }
+        sendTelegramMessage($chatID, $payload, $options);
     }
 }
 ?>
