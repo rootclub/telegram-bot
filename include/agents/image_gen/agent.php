@@ -1,8 +1,9 @@
 <?php
 /**
- * Agente Image Gen — genera immagini via ComfyUI (z-image turbo)
+ * Agente Image Gen — genera immagini via ComfyUI (z-image turbo).
+ * Autocontenuto: workflow JSON in ./workflows/, tabella image_gen_usage dichiarata in 'schema'.
  */
-require_once dirname(__DIR__) . '/logger.php';
+require_once dirname(__DIR__, 2) . '/logger.php';
 
 return [
     'id' => 'image_gen',
@@ -12,6 +13,16 @@ return [
         'formato' => "Formato dell'immagine SE esplicitamente richiesto: 'landscape' (orizzontale/panorama), 'portrait' (verticale/ritratto) o 'square' (quadrato). Se l'utente non specifica il formato, usa 'square'",
     ],
     'sends_own_response' => true,
+    'schema' => function (SQLite3 $db): void {
+        $db->exec("CREATE TABLE IF NOT EXISTS image_gen_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_image_gen_user ON image_gen_usage(user_id, timestamp)");
+        $oneHourAgo = time() - 3600;
+        $db->exec("DELETE FROM image_gen_usage WHERE timestamp < {$oneHourAgo}");
+    },
     'handler' => function (array $ctx, array $params): ?array {
         $logFile = logPath('image_gen');
         $log = function (string $msg) use ($logFile) {
@@ -131,7 +142,7 @@ SYS;
         }
 
         // --- Step 2: Carica e configura il workflow ---
-        $workflowPath = dirname(__DIR__, 2) . '/workflows/image_z_image_turbo.json';
+        $workflowPath = __DIR__ . '/workflows/z_image_turbo.json';
         $workflow = json_decode(file_get_contents($workflowPath), true);
         if (!$workflow) {
             $cleanup();

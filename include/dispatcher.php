@@ -6,8 +6,9 @@
 require_once __DIR__ . '/logger.php';
 
 /**
- * Carica il registry degli agenti da include/agents/*.php
+ * Carica il registry degli agenti da include/agents/{id}/agent.php
  * Ogni file ritorna un array con: id, description, parameters, handler, ecc.
+ * Ogni agente è una directory autocontenuta (declaration, schema, workflow, helper).
  */
 function loadAgentRegistry(): array {
     static $registry = null;
@@ -16,7 +17,7 @@ function loadAgentRegistry(): array {
     $registry = ['agents' => [], 'default' => null, 'enrichments' => []];
     $agentDir = __DIR__ . '/agents/';
 
-    foreach (glob($agentDir . '*.php') as $file) {
+    foreach (glob($agentDir . '*/agent.php') as $file) {
         $agent = require $file;
         if (!is_array($agent) || empty($agent['id'])) continue;
 
@@ -31,6 +32,23 @@ function loadAgentRegistry(): array {
     }
 
     return $registry;
+}
+
+/**
+ * Inizializza gli schemi DB di tutti gli agenti che dichiarano 'schema' => callable.
+ * Invocata dopo initDatabase() sulle tabelle core. Idempotente: i callable devono
+ * usare CREATE TABLE IF NOT EXISTS, ALTER guardate da PRAGMA table_info, ecc.
+ */
+function initAgentSchemas(SQLite3 $db): void {
+    $registry = loadAgentRegistry();
+    foreach ($registry['agents'] as $id => $agent) {
+        if (empty($agent['schema']) || !is_callable($agent['schema'])) continue;
+        try {
+            ($agent['schema'])($db);
+        } catch (\Throwable $e) {
+            error_log("[dispatcher] Schema init failed for agent '{$id}': " . $e->getMessage());
+        }
+    }
 }
 
 /**

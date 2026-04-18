@@ -34,7 +34,6 @@ This is a PHP-based Telegram bot that handles group chat interactions with vario
 - `message.php`: Message processing, command routing (elseif chain), `sendPrivateResponse()`
 - `orders.php`: Food ordering system ("pappatoie") management
 - `events.php`: Event creation, participation, multi-step workflows (`handleEventInput()`)
-- `quiz.php`: Quiz generation, Wikipedia search, LLM generator + reviewer, `listQuizTopics()`
 - `moderation.php`: Profanity detection and user moderation
 - `image.php`: Image download and storage handling
 - `help.php`: Help command responses
@@ -43,7 +42,18 @@ This is a PHP-based Telegram bot that handles group chat interactions with vario
 
 ### Sub-Agent System (`include/agents/` directory)
 
-The dispatcher uses a **modular sub-agent architecture**. Each agent is a PHP file that returns a declaration array. The classifier dynamically builds its prompt from all registered agents — adding a new agent requires only creating a file in `include/agents/`, no changes to the dispatcher.
+The dispatcher uses a **modular, plug-and-play sub-agent architecture**. Each agent is a **self-contained directory** `include/agents/{id}/` that owns its declaration, DB schema, workflow files and helper functions. Installing/removing an agent is a drag-and-drop of its directory — no other file needs to change.
+
+At bootstrap, `loadAgentRegistry()` globs `include/agents/*/agent.php`; `initAgentSchemas($db)` (called at the end of `initDatabase()`) invokes each agent's `schema` callable to create/migrate its tables idempotently.
+
+#### Agent Directory Layout
+
+```
+include/agents/{id}/
+├── agent.php            # declaration array (required entry point)
+├── workflows/*.json     # optional: ComfyUI workflows
+└── *.php                # optional: helper modules (require_once'd by agent.php)
+```
 
 #### Agent Declaration Format
 
@@ -59,17 +69,23 @@ return [
     'default' => true,              // Fallback agent (only one)
     'enriches' => 'other_agent_id', // Enrichment pattern (runs before target agent)
     'sends_own_response' => true,   // Agent sends its own Telegram messages
+    'schema' => function(SQLite3 $db): void {
+        // CREATE TABLE IF NOT EXISTS ..., ALTER TABLE guarded by PRAGMA table_info,
+        // INSERT OR IGNORE seeds, DELETE cleanup policies. Must be idempotent.
+    },
 ];
 ```
 
+Helper functions defined at require-time inside `agent.php` (before the `return`) become globally available, e.g. `saveImageLog()` from `image_query/agent.php` is used by `bot.php` in the vision flow.
+
 #### Current Agents
 
-- **`chat.php`** (default): Normal conversation — calls `_ai_core()` with optional enrichments
-- **`wikipedia.php`** (enriches `chat`): Factual/encyclopedic questions — searches Wikipedia, injects context into chat prompt
-- **`quiz.php`**: Quiz/trivia requests — calls `generateAndSendQuiz()`, sends its own poll
-- **`image_query.php`**: Questions about previously shared images — matches reference via LLM light, re-analyzes with `analyzeImage()`
-- **`image_gen.php`**: Image generation via ComfyUI — translates Italian prompt to English via LLM, submits to z-image turbo workflow, rate limited (6/hour per user)
-- **`audio_gen.php`**: Music/song generation via ComfyUI (ACE-Step 1.5 XL Turbo) — LLM (full model) composes CAPTION/LYRICS/BPM/KEYSCALE/LANGUAGE/DURATION from the ACE-Step guide, submits workflow, sends MP3 as `sendAudio`, rate limited (6/hour per user)
+- **`chat/`** (default): Normal conversation — calls `_ai_core()` with optional enrichments
+- **`wikipedia/`** (enriches `chat`): Factual/encyclopedic questions — searches Wikipedia, injects context into chat prompt
+- **`quiz/`**: Quiz/trivia requests — calls `generateAndSendQuiz()`, sends its own poll. Bundles `quiz.php` (full quiz logic: Wikipedia search, dual LLM generator+reviewer, leaderboard, topic admin) and owns tables `quiz_topics`, `quiz_history`, `quiz_responses`
+- **`image_query/`**: Questions about previously shared images — matches reference via LLM light, re-analyzes with `analyzeImage()`. Owns table `image_log` and exposes `saveImageLog()` / `getRecentImages()`
+- **`image_gen/`**: Image generation via ComfyUI — bundled workflow `workflows/z_image_turbo.json`. Rate-limited (6/hour) via owned table `image_gen_usage`
+- **`audio_gen/`**: Music/song generation via ComfyUI (ACE-Step 1.5 XL Turbo) — bundled workflow `workflows/ace_step1_5_xl_turbo.json`. Rate-limited (6/hour) via owned table `audio_gen_usage`
 
 #### Classifier Flow
 
@@ -181,18 +197,9 @@ The `audio_gen` agent generates songs via ComfyUI (ACE-Step 1.5 XL Turbo):
 
 10. **partecipanti_eventi** / **ospiti_eventi** - Event participants and guests
 
-11. **quiz_topics** - Available quiz topics
-    - `id`, `topic`, `description`, `created_at`
+11. **quiz_topics**, **quiz_history**, **quiz_responses** — owned by the `quiz` agent, schema declared in `include/agents/quiz/agent.php`
 
-12. **quiz_history** - Sent quizzes
-    - `id`, `chat_id`, `poll_id`, `message_id`, `topic`, `wikipedia_title`, `question`, `options`, `correct_option`, `explanation`
-
-13. **quiz_responses** - User quiz answers for leaderboard
-    - `id`, `quiz_id`, `poll_id`, `user_id`, `user_name`, `selected_option`, `is_correct`
-
-14. **image_log** - Image file_ids for recall
-    - `id`, `group_id`, `user_id`, `user_name`, `file_id`, `description`, `timestamp`
-    - Auto-cleanup: images older than 30 days
+12. **image_log** — owned by the `image_query` agent (`include/agents/image_query/agent.php`). Stores `file_id` + description of recent images for recall. Auto-cleanup: 30 days.
 
 15. **memorie_utenti** - User profile memories
     - `user_id` (PK), `user_name`, `profilo`, `message_count`, `last_processed_msg_id`, `last_updated`
@@ -213,17 +220,11 @@ The `audio_gen` agent generates songs via ComfyUI (ACE-Step 1.5 XL Turbo):
     - `id`, `group_id`, `telegram_msg_id`, `user_id`, `user_name`, `message_text`, `timestamp`
     - UNIQUE on `(group_id, telegram_msg_id)` for idempotent import
 
-22. **image_gen_usage** - Rate limiting for AI image generation
-    - `id`, `user_id`, `timestamp`
-    - Auto-cleanup: records older than 1 hour
+22. **image_gen_usage**, **audio_gen_usage** — rate-limit tables owned by the `image_gen` and `audio_gen` agents respectively (schema in each agent's `agent.php`). Auto-cleanup: 1 hour.
 
 23. **rassegna_posted** - Articles already posted by morning press digest (dedup)
     - `url` (PK), `title`, `posted_at`
     - Auto-cleanup: records older than 30 days
-
-24. **audio_gen_usage** - Rate limiting for AI music generation
-    - `id`, `user_id`, `timestamp`
-    - Auto-cleanup: records older than 1 hour
 
 ## Development Commands
 
@@ -253,10 +254,15 @@ Since this is a webhook-based bot, you'll need:
 4. Write permissions for `images/` directory and SQLite database
 
 ### Adding a New Sub-Agent
-1. Create `include/agents/your_agent.php` returning a declaration array
+1. Create a directory `include/agents/your_agent/` with `agent.php` returning a declaration array
 2. Define `id`, `description` (in Italian), `parameters`, `handler`
-3. Deploy — the dispatcher discovers it automatically via `glob()`
-4. Check `dispatcher.log` on the server for classification results
+3. If the agent needs DB tables, add a `schema` callable (see "Agent Declaration Format" above) — it runs on every bootstrap, must be idempotent
+4. If the agent has workflow files or helper PHP modules, put them inside the directory and reference them with `__DIR__`
+5. Deploy — the dispatcher discovers it automatically via `glob('include/agents/*/agent.php')`
+6. Check `dispatcher.log` on the server for classification results
+
+### Removing a Sub-Agent
+Delete the agent's directory. The classifier no longer offers that intent; the owned tables remain in the DB (harmless) and can be dropped manually if desired. **Note:** slash commands and help entries are still hardcoded in `message.php`/`help.php` (see TODO in memory: `project_agent_improvements.md`) — remove those references manually.
 
 ### Log Files
 

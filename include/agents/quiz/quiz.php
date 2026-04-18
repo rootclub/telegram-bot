@@ -4,8 +4,8 @@
  * Genera quiz da Wikipedia usando doppio LLM (generatore + revisore)
  */
 
-require_once __DIR__ . '/QBertClient.php';
-require_once __DIR__ . '/logger.php';
+require_once dirname(__DIR__, 2) . '/QBertClient.php';
+require_once dirname(__DIR__, 2) . '/logger.php';
 
 /**
  * Chiama Ollama con un modello specifico via QBert

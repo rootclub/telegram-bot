@@ -226,26 +226,9 @@ function initDatabase() {
     $fiveMinutesAgo = time() - 300;
     $db->exec("DELETE FROM message_dedup WHERE timestamp < $fiveMinutesAgo");
 
-    // Rate limit generazione immagini
-    $db->exec("CREATE TABLE IF NOT EXISTS image_gen_usage (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL
-    )");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_image_gen_user ON image_gen_usage(user_id, timestamp)");
-    // Pulizia automatica: rimuovi record più vecchi di 1 ora
-    $oneHourAgo = time() - 3600;
-    $db->exec("DELETE FROM image_gen_usage WHERE timestamp < $oneHourAgo");
-
-    // Rate limit generazione audio/brani
-    $db->exec("CREATE TABLE IF NOT EXISTS audio_gen_usage (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL
-    )");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_audio_gen_user ON audio_gen_usage(user_id, timestamp)");
-    // Pulizia automatica: rimuovi record più vecchi di 1 ora
-    $db->exec("DELETE FROM audio_gen_usage WHERE timestamp < $oneHourAgo");
+    // NOTA: le tabelle image_gen_usage e audio_gen_usage ora sono dichiarate
+    // dai rispettivi agenti in include/agents/{id}/agent.php (campo 'schema').
+    // Vedi initAgentSchemas() invocato in fondo a questa funzione.
 
     // Migration: aggiungi colonne se non esistono
     // Per user_states - aggiungi user_id e created_at
@@ -312,62 +295,8 @@ function initDatabase() {
         $db->exec("UPDATE ordini SET ritirante_name = CAST(ritirante AS TEXT) WHERE ritirante_name IS NULL");
     }
 
-    // === TABELLE SISTEMA QUIZ ===
-
-    // Argomenti quiz disponibili (per /quiz senza argomento)
-    $db->exec("CREATE TABLE IF NOT EXISTS quiz_topics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        topic TEXT NOT NULL UNIQUE,
-        description TEXT,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-    )");
-
-    // Storico quiz inviati
-    $db->exec("CREATE TABLE IF NOT EXISTS quiz_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
-        poll_id TEXT NOT NULL UNIQUE,
-        message_id INTEGER,
-        topic TEXT NOT NULL,
-        wikipedia_title TEXT,
-        question TEXT NOT NULL,
-        options TEXT,
-        correct_option INTEGER NOT NULL,
-        explanation TEXT,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-    )");
-
-    // Migration: aggiungi colonna options se non esiste
-    $result = $db->query("PRAGMA table_info(quiz_history)");
-    $hasOptions = false;
-    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
-        if ($row['name'] == 'options') {
-            $hasOptions = true;
-            break;
-        }
-    }
-    if (!$hasOptions) {
-        $db->exec("ALTER TABLE quiz_history ADD COLUMN options TEXT");
-    }
-
-    // Risposte utenti per classifica
-    $db->exec("CREATE TABLE IF NOT EXISTS quiz_responses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        quiz_id INTEGER NOT NULL,
-        poll_id TEXT NOT NULL,
-        user_id INTEGER NOT NULL,
-        user_name TEXT,
-        selected_option INTEGER NOT NULL,
-        is_correct INTEGER NOT NULL,
-        answered_at INTEGER DEFAULT (strftime('%s', 'now')),
-        FOREIGN KEY (quiz_id) REFERENCES quiz_history(id),
-        UNIQUE(poll_id, user_id)
-    )");
-
-    // Indici per performance quiz
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_history_poll_id ON quiz_history(poll_id)");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_responses_poll_id ON quiz_responses(poll_id)");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_quiz_responses_user_id ON quiz_responses(user_id)");
+    // NOTA: le tabelle quiz_topics/quiz_history/quiz_responses (+ seed topic di default)
+    // ora sono dichiarate dall'agente quiz in include/agents/quiz/agent.php (campo 'schema').
 
     // Tabella cache TTS (voice file_id per evitare rigenerazione)
     $db->exec("CREATE TABLE IF NOT EXISTS tts_cache (
@@ -394,43 +323,16 @@ function initDatabase() {
     $oneDayAgo = time() - (24 * 3600);
     $db->exec("DELETE FROM bot_replied WHERE replied_at < $oneDayAgo");
 
-    // Log immagini: salva file_id per ri-analisi su richiesta
-    $db->exec("CREATE TABLE IF NOT EXISTS image_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        group_id INTEGER,
-        user_id INTEGER,
-        user_name TEXT,
-        file_id TEXT NOT NULL,
-        description TEXT,
-        timestamp INTEGER
-    )");
-    $db->exec("CREATE INDEX IF NOT EXISTS idx_image_log_group ON image_log(group_id, timestamp)");
-    // Pulizia automatica: rimuovi immagini più vecchie di 30 giorni
-    $monthAgo = time() - (30 * 24 * 3600);
-    $db->exec("DELETE FROM image_log WHERE timestamp < $monthAgo");
+    // NOTA: la tabella image_log (+ funzioni saveImageLog/getRecentImages) ora
+    // è dichiarata dall'agente image_query in include/agents/image_query/agent.php.
 
-    // Popola topic iniziali se tabella vuota
-    $result = $db->query("SELECT COUNT(*) as count FROM quiz_topics");
-    $row = $result->fetchArray(SQLITE3_ASSOC);
-    if ($row['count'] == 0) {
-        $defaultTopics = [
-            ['storia', 'Eventi storici, personaggi, date importanti'],
-            ['scienza', 'Fisica, chimica, biologia, astronomia'],
-            ['tecnologia', 'Informatica, elettronica, innovazioni'],
-            ['geografia', 'Paesi, citta, fiumi, montagne'],
-            ['cultura', 'Arte, letteratura, musica, cinema'],
-            ['natura', 'Animali, piante, ecosistemi'],
-            ['sport', 'Discipline sportive, olimpiadi, record'],
-            ['videogiochi', 'Arcade, console, storia dei videogiochi'],
-            ['anime', 'Anime classici e moderni, manga'],
-            ['elettronica', 'Circuiti, componenti, fondamenti']
-        ];
-        foreach ($defaultTopics as $t) {
-            $stmt = $db->prepare("INSERT OR IGNORE INTO quiz_topics (topic, description) VALUES (:topic, :desc)");
-            $stmt->bindValue(':topic', $t[0], SQLITE3_TEXT);
-            $stmt->bindValue(':desc', $t[1], SQLITE3_TEXT);
-            $stmt->execute();
-        }
+    // === Inizializzazione schemi degli agenti ===
+    // loadAgentRegistry() fa il require di tutti gli agents/*/agent.php, definendo
+    // a global scope le funzioni helper degli agenti (es. saveImageLog) usate anche
+    // altrove nel codebase. initAgentSchemas() invoca poi il callable 'schema' di
+    // ogni agente per creare/migrare le tabelle di sua proprietà.
+    if (function_exists('initAgentSchemas')) {
+        initAgentSchemas($db);
     }
 }
 
@@ -473,40 +375,7 @@ function markAsReplied($chatId, $messageId) {
     return ($db->changes() > 0);
 }
 
-/**
- * Salva un'immagine nel log per ri-analisi futura
- */
-function saveImageLog($groupId, $userId, $userName, $fileId, $description) {
-    global $db;
-    $stmt = $db->prepare("INSERT INTO image_log (group_id, user_id, user_name, file_id, description, timestamp)
-                          VALUES (:group_id, :user_id, :user_name, :file_id, :description, :timestamp)");
-    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
-    $stmt->bindValue(':user_id', $userId, SQLITE3_INTEGER);
-    $stmt->bindValue(':user_name', $userName, SQLITE3_TEXT);
-    $stmt->bindValue(':file_id', $fileId, SQLITE3_TEXT);
-    $stmt->bindValue(':description', $description, SQLITE3_TEXT);
-    $stmt->bindValue(':timestamp', time(), SQLITE3_INTEGER);
-    $stmt->execute();
-}
-
-/**
- * Recupera le ultime N immagini di un gruppo
- * @return array Lista di ['file_id', 'description', 'user_name', 'timestamp']
- */
-function getRecentImages($groupId, $limit = 10) {
-    global $db;
-    $stmt = $db->prepare("SELECT file_id, description, user_name, timestamp
-                          FROM image_log
-                          WHERE group_id = :group_id
-                          ORDER BY timestamp DESC
-                          LIMIT " . intval($limit));
-    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
-    $result = $stmt->execute();
-
-    $images = [];
-    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
-        $images[] = $row;
-    }
-    return $images;
-}
+// saveImageLog() e getRecentImages() sono state spostate nell'agente image_query
+// (include/agents/image_query/agent.php). Vengono definite a livello globale
+// quando loadAgentRegistry() carica il file dell'agente durante initDatabase().
 ?>

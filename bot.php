@@ -10,7 +10,6 @@ include "include/ai.php";
 include "include/moderation.php";
 include "include/orders.php";
 include "include/events.php";
-include "include/quiz.php";
 include "include/dispatcher.php";
 include "include/message.php";
 

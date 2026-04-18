@@ -1,10 +1,50 @@
 <?php
 /**
- * Agente Image Query — domande su immagini condivise in precedenza
+ * Agente Image Query — domande su immagini condivise in precedenza.
  *
- * Cerca tra le immagini recenti quella a cui l'utente si riferisce,
- * poi rilancia analyzeImage() con la domanda specifica.
+ * Autocontenuto: possiede la tabella image_log (dichiarata in 'schema') e le
+ * funzioni globali saveImageLog/getRecentImages, usate anche da bot.php per il
+ * flusso vision. Rimuovendo la directory dell'agente sparisce anche il log immagini.
  */
+
+/**
+ * Salva un'immagine nel log per ri-analisi futura.
+ * Definita a require-time, disponibile globalmente (usata da bot.php).
+ */
+function saveImageLog($groupId, $userId, $userName, $fileId, $description) {
+    global $db;
+    $stmt = $db->prepare("INSERT INTO image_log (group_id, user_id, user_name, file_id, description, timestamp)
+                          VALUES (:group_id, :user_id, :user_name, :file_id, :description, :timestamp)");
+    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
+    $stmt->bindValue(':user_id', $userId, SQLITE3_INTEGER);
+    $stmt->bindValue(':user_name', $userName, SQLITE3_TEXT);
+    $stmt->bindValue(':file_id', $fileId, SQLITE3_TEXT);
+    $stmt->bindValue(':description', $description, SQLITE3_TEXT);
+    $stmt->bindValue(':timestamp', time(), SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
+/**
+ * Recupera le ultime N immagini di un gruppo.
+ * @return array Lista di ['file_id', 'description', 'user_name', 'timestamp']
+ */
+function getRecentImages($groupId, $limit = 10) {
+    global $db;
+    $stmt = $db->prepare("SELECT file_id, description, user_name, timestamp
+                          FROM image_log
+                          WHERE group_id = :group_id
+                          ORDER BY timestamp DESC
+                          LIMIT " . intval($limit));
+    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
+    $result = $stmt->execute();
+
+    $images = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $images[] = $row;
+    }
+    return $images;
+}
+
 return [
     'id' => 'image_query',
     'description' => "L'utente chiede informazioni su un'immagine o foto condivisa in precedenza nel gruppo (es. 'cosa c'era nell'ultima foto?', 'nella foto dei gattini...', 'dimmi di piu sull'immagine di prima', 'che auto era quella nella foto?')",
@@ -12,6 +52,20 @@ return [
         'riferimento' => "Descrizione dell'immagine a cui l'utente si riferisce (es. 'ultima foto', 'foto dei gattini', 'immagine del circuito'). Se l'utente dice 'ultima' o non specifica, scrivi 'ultima'.",
         'domanda' => "La domanda specifica dell'utente sull'immagine",
     ],
+    'schema' => function (SQLite3 $db): void {
+        $db->exec("CREATE TABLE IF NOT EXISTS image_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER,
+            user_id INTEGER,
+            user_name TEXT,
+            file_id TEXT NOT NULL,
+            description TEXT,
+            timestamp INTEGER
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_image_log_group ON image_log(group_id, timestamp)");
+        $monthAgo = time() - (30 * 24 * 3600);
+        $db->exec("DELETE FROM image_log WHERE timestamp < {$monthAgo}");
+    },
     'handler' => function (array $ctx, array $params): ?array {
         $riferimento = trim($params['riferimento'] ?? 'ultima');
         $domanda = trim($params['domanda'] ?? '');

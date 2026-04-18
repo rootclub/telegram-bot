@@ -1,11 +1,12 @@
 <?php
 /**
- * Agente Audio Gen — genera brani musicali via ComfyUI (ACE-Step 1.5 XL Turbo)
+ * Agente Audio Gen — genera brani musicali via ComfyUI (ACE-Step 1.5 XL Turbo).
+ * Autocontenuto: workflow JSON in ./workflows/, tabella audio_gen_usage dichiarata in 'schema'.
  *
  * Flow: prompt utente → LLM (guida ACE-Step) → CAPTION/LYRICS/BPM/KEYSCALE/LANGUAGE/DURATION
  *       → workflow ComfyUI → MP3 → sendAudio.
  */
-require_once dirname(__DIR__) . '/logger.php';
+require_once dirname(__DIR__, 2) . '/logger.php';
 
 return [
     'id' => 'audio_gen',
@@ -14,6 +15,16 @@ return [
         'prompt' => "Descrizione del brano richiesto in italiano: genere, mood, tema del testo, strumenti, voce, ecc. — tutto ciò che l'utente specifica",
     ],
     'sends_own_response' => true,
+    'schema' => function (SQLite3 $db): void {
+        $db->exec("CREATE TABLE IF NOT EXISTS audio_gen_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            timestamp INTEGER NOT NULL
+        )");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_audio_gen_user ON audio_gen_usage(user_id, timestamp)");
+        $oneHourAgo = time() - 3600;
+        $db->exec("DELETE FROM audio_gen_usage WHERE timestamp < {$oneHourAgo}");
+    },
     'handler' => function (array $ctx, array $params): ?array {
         $logFile = logPath('audio_gen');
         $log = function (string $msg) use ($logFile) {
@@ -274,7 +285,7 @@ SYS;
         }
 
         // --- Step 3: Carica e configura workflow ---
-        $workflowPath = dirname(__DIR__, 2) . '/workflows/audio_ace_step1_5_xl_turbo.json';
+        $workflowPath = __DIR__ . '/workflows/ace_step1_5_xl_turbo.json';
         $workflow = json_decode(file_get_contents($workflowPath), true);
         if (!$workflow) {
             $cleanup();
