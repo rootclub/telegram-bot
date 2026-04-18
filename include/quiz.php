@@ -183,11 +183,7 @@ function isDisambiguationPage($extract) {
  * Aggiorna il messaggio di stato del quiz
  */
 function updateQuizStatus($chatId, $messageId, $text) {
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $messageId,
-        'text' => $text
-    ]);
+    editTelegramMessage($chatId, $messageId, $text);
 }
 
 /**

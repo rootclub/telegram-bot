@@ -258,12 +258,11 @@ function handlePartecipoEvento($callbackQuery) {
         'callback_query_id' => $callbackQuery['id']
     ]);
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => $response,
-        'parse_mode' => 'HTML'
-    ]);
+    editTelegramMessage(
+        $chatId,
+        $callbackQuery['message']['message_id'],
+        new TelegramHtml($response)
+    );
 }
 
 /**
@@ -519,12 +518,11 @@ function handleAnnulloTipo($callbackQuery) {
         'callback_query_id' => $callbackQuery['id']
     ]);
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => $response,
-        'parse_mode' => 'HTML'
-    ]);
+    editTelegramMessage(
+        $chatId,
+        $callbackQuery['message']['message_id'],
+        new TelegramHtml($response)
+    );
 }
 
 /**
@@ -648,12 +646,11 @@ function handleListaPartecipanti($callbackQuery) {
         'callback_query_id' => $callbackQuery['id']
     ]);
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => $response,
-        'parse_mode' => 'HTML'
-    ]);
+    editTelegramMessage(
+        $chatId,
+        $callbackQuery['message']['message_id'],
+        new TelegramHtml($response)
+    );
 }
 
 /**
@@ -816,12 +813,11 @@ function handleModificaCampo($callbackQuery) {
         'callback_query_id' => $callbackQuery['id']
     ]);
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => $prompts[$campo],
-        'parse_mode' => 'HTML'
-    ]);
+    editTelegramMessage(
+        $chatId,
+        $callbackQuery['message']['message_id'],
+        new TelegramHtml($prompts[$campo])
+    );
 }
 
 /**
@@ -1013,12 +1009,13 @@ function handleConfermaChiudiEvento($callbackQuery) {
         'text' => 'Evento chiuso'
     ]);
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => "L'evento <b>{$evento['descrizione']}</b> è stato chiuso.",
-        'parse_mode' => 'HTML'
-    ]);
+    editTelegramMessage(
+        $chatId,
+        $callbackQuery['message']['message_id'],
+        tgHtml("L'evento <b>{descrizione}</b> è stato chiuso.", [
+            'descrizione' => $evento['descrizione'],
+        ])
+    );
 }
 
 /**
@@ -1031,11 +1028,11 @@ function handleAnnullaChiudiEvento($callbackQuery) {
         'callback_query_id' => $callbackQuery['id']
     ]);
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => "Operazione annullata."
-    ]);
+    editTelegramMessage(
+        $chatId,
+        $callbackQuery['message']['message_id'],
+        "Operazione annullata."
+    );
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -1143,12 +1140,11 @@ function handleOspiteEvento($callbackQuery) {
         'callback_query_id' => $callbackQuery['id']
     ]);
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => $response,
-        'parse_mode' => 'HTML'
-    ]);
+    editTelegramMessage(
+        $chatId,
+        $callbackQuery['message']['message_id'],
+        new TelegramHtml($response)
+    );
 }
 
 /**
@@ -1231,12 +1227,11 @@ function handleAnnulloOspiteCallback($callbackQuery) {
         'callback_query_id' => $callbackQuery['id']
     ]);
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $chatId,
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => $response,
-        'parse_mode' => 'HTML'
-    ]);
+    editTelegramMessage(
+        $chatId,
+        $callbackQuery['message']['message_id'],
+        new TelegramHtml($response)
+    );
 }
 
 /**

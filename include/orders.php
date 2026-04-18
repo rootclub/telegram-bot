@@ -216,11 +216,11 @@ function gestisci_selezione_pappatoia($callbackQuery) {
         'text' => "Asporto '{$pappatoiaInfo['pappatoia']}' selezionato per l'ordine."
     ]);
     
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $callbackQuery['message']['chat']['id'],
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => "Asporto '{$pappatoiaInfo['pappatoia']}' selezionato per l'ordine."
-    ]);
+    editTelegramMessage(
+        $callbackQuery['message']['chat']['id'],
+        $callbackQuery['message']['message_id'],
+        "Asporto '{$pappatoiaInfo['pappatoia']}' selezionato per l'ordine."
+    );
 }
 
 
@@ -580,12 +580,12 @@ function handle_select_pappatoia_for_menu($callbackQuery) {
         'inline_keyboard' => $keyboard
     ];
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $callbackQuery['message']['chat']['id'],
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => "Per l'asporto '$pappatoiaNome', vuoi cancellare le vecchie foto o aggiungerne di nuove?",
-        'reply_markup' => json_encode($replyMarkup)
-    ]);
+    editTelegramMessage(
+        $callbackQuery['message']['chat']['id'],
+        $callbackQuery['message']['message_id'],
+        "Per l'asporto '$pappatoiaNome', vuoi cancellare le vecchie foto o aggiungerne di nuove?",
+        ['reply_markup' => json_encode($replyMarkup)]
+    );
 }
 
 function handle_menu_action($callbackQuery) {
@@ -608,11 +608,11 @@ function handle_menu_action($callbackQuery) {
     $stmt->bindValue(':created_at', time(), SQLITE3_INTEGER);
     $stmt->execute();
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $callbackQuery['message']['chat']['id'],
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => "Ora puoi inviare le nuove immagini per il menu. Invia /fine quando hai terminato."
-    ]);
+    editTelegramMessage(
+        $callbackQuery['message']['chat']['id'],
+        $callbackQuery['message']['message_id'],
+        "Ora puoi inviare le nuove immagini per il menu. Invia /fine quando hai terminato."
+    );
 }
 
 function delete_old_photos($pappatoiaId) {
@@ -1169,12 +1169,12 @@ function handle_delete_pappatoia($callbackQuery) {
         'inline_keyboard' => $keyboard
     ];
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $callbackQuery['message']['chat']['id'],
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => "Sei sicuro di voler eliminare l'asporto '$pappatoiaNome'?",
-        'reply_markup' => json_encode($replyMarkup)
-    ]);
+    editTelegramMessage(
+        $callbackQuery['message']['chat']['id'],
+        $callbackQuery['message']['message_id'],
+        "Sei sicuro di voler eliminare l'asporto '$pappatoiaNome'?",
+        ['reply_markup' => json_encode($replyMarkup)]
+    );
 }
 
 function confirm_delete_pappatoia($callbackQuery) {
@@ -1237,19 +1237,19 @@ function confirm_delete_pappatoia($callbackQuery) {
 
     $db->exec("COMMIT");
 
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $callbackQuery['message']['chat']['id'],
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => "Asporto '$pappatoiaNome' eliminato con successo."
-    ]);
+    editTelegramMessage(
+        $callbackQuery['message']['chat']['id'],
+        $callbackQuery['message']['message_id'],
+        "Asporto '$pappatoiaNome' eliminato con successo."
+    );
 }
 
 function cancel_delete_pappatoia($callbackQuery) {
-    makeAPIRequest('editMessageText', [
-        'chat_id' => $callbackQuery['message']['chat']['id'],
-        'message_id' => $callbackQuery['message']['message_id'],
-        'text' => "Eliminazione asporto annullata."
-    ]);
+    editTelegramMessage(
+        $callbackQuery['message']['chat']['id'],
+        $callbackQuery['message']['message_id'],
+        "Eliminazione asporto annullata."
+    );
 }
 
 ?>
