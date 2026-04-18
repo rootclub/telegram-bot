@@ -1840,10 +1840,8 @@ function handleTTSCallback($callbackQuery) {
 
     if (!$wavData) {
         file_put_contents($logFile, "[TTS] generateTTSWithTyping returned null\n", FILE_APPEND);
-        makeAPIRequest('sendMessage', [
-            'chat_id' => $chatId,
-            'text' => 'Errore nella generazione audio.',
-            'reply_to_message_id' => $messageId
+        sendTelegramMessage($chatId, 'Errore nella generazione audio.', [
+            'reply_to_message_id' => $messageId,
         ]);
         return;
     }
@@ -1872,10 +1870,8 @@ function handleTTSCallback($callbackQuery) {
 
     if (!$isOgg && !$isWav) {
         file_put_contents($logFile, "[TTS] Data is not OGG or WAV, first 100 bytes: " . substr($audioData, 0, 100) . "\n", FILE_APPEND);
-        makeAPIRequest('sendMessage', [
-            'chat_id' => $chatId,
-            'text' => 'Errore: risposta audio non valida.',
-            'reply_to_message_id' => $messageId
+        sendTelegramMessage($chatId, 'Errore: risposta audio non valida.', [
+            'reply_to_message_id' => $messageId,
         ]);
         return;
     }
