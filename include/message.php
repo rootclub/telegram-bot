@@ -43,32 +43,24 @@ function recordMessage($userId, $text) {
 }
 
 function sendPrivateResponse($userId, $text, $chatId = null) {
-    $messageParams = [
-        'chat_id' => $userId,
-        'text' => $text,
-    ];
+    $options = [];
     if (TTS_ENABLED) {
-        $messageParams['reply_markup'] = json_encode([
+        $options['reply_markup'] = json_encode([
             'inline_keyboard' => [[
                 ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
             ]]
         ]);
     }
-    $privateChat = makeAPIRequest('sendMessage', $messageParams);
+    $privateChat = sendTelegramMessage($userId, $text, $options);
 
-    if (!$privateChat || !$privateChat['ok']) {
-        // Log dell'errore per debug
-        error_log("Failed to send private message to user $userId: " . json_encode($privateChat));
-        
-        // Se l'invio del messaggio privato fallisce e abbiamo l'ID del gruppo, informiamo l'utente nel gruppo
+    if (!$privateChat['ok']) {
+        error_log("Failed to send private message to user $userId: err=" . ($privateChat['error_code'] ?? '?') . " desc=" . ($privateChat['description'] ?? ''));
+
+        // Fallback: se abbiamo l'ID del gruppo, informiamo l'utente lì
         if ($chatId) {
-            $groupMessage = makeAPIRequest('sendMessage', [
-                'chat_id' => $chatId,
-                'text' => "Non sono riuscito a inviarti un messaggio privato. Per favore, avvia una chat con me cliccando su @rootbotbot e poi su 'Avvia', quindi riprova."
-            ]);
-            
-            if (!$groupMessage || !$groupMessage['ok']) {
-                error_log("Failed to send group message to chat $chatId: " . json_encode($groupMessage));
+            $groupMessage = sendTelegramMessage($chatId, "Non sono riuscito a inviarti un messaggio privato. Per favore, avvia una chat con me cliccando su @rootbotbot e poi su 'Avvia', quindi riprova.");
+            if (!$groupMessage['ok']) {
+                error_log("Failed to send group message to chat $chatId: err=" . ($groupMessage['error_code'] ?? '?'));
             }
         }
         return false;
@@ -106,25 +98,14 @@ function processMessage($message) {
     }
 
     // Gestione input multi-step per eventi
+    // handleEventCreation/handleEventModification ritornano TelegramHtml (tag HTML
+    // intenzionali) o string plain; il wrapper setta parse_mode=HTML automaticamente
+    // nel primo caso e gestisce retry reply_to + plain fallback.
     $eventResponse = handleEventInput($message);
     if ($eventResponse !== null) {
-        $result = makeAPIRequest('sendMessage', [
-            'chat_id' => $chatID,
-            'text' => $eventResponse,
-            'parse_mode' => 'HTML',
-            'reply_to_message_id' => $message['message_id']
+        sendTelegramMessage($chatID, $eventResponse, [
+            'reply_to_message_id' => $message['message_id'],
         ]);
-        // Se il reply fallisce, riprova senza reply
-        if (!$result || !$result['ok']) {
-            if (isset($result['error_code']) && $result['error_code'] == 400 &&
-                strpos($result['description'], 'message to be replied not found') !== false) {
-                makeAPIRequest('sendMessage', [
-                    'chat_id' => $chatID,
-                    'text' => $eventResponse,
-                    'parse_mode' => 'HTML'
-                ]);
-            }
-        }
         return;
     }
 
@@ -252,10 +233,7 @@ function processMessage($message) {
     } elseif ($text == '/argomenti_quiz' || $text == '/argomenti_quiz@rootbotbot') {
         $messages = listQuizTopics();
         foreach ($messages as $msg) {
-            makeAPIRequest('sendMessage', [
-                'chat_id' => $chatID,
-                'text' => $msg,
-            ]);
+            sendTelegramMessage($chatID, $msg);
         }
 
     } elseif ($text == '/classifica_quiz' || $text == '/classifica_quiz@rootbotbot') {

@@ -139,25 +139,34 @@ function handleEventCreation($message) {
 
     switch ($state) {
         case 'waiting_event_description':
+            // Rimuove eventuali tag HTML dall'input utente (il bot non supporta
+            // formattazione user-driven sulle descrizioni: resta plain text).
+            $text = strip_tags($text);
             $data['descrizione'] = $text;
             setUserState($chatId, $userId, 'waiting_event_datetime', $data);
-            return "Descrizione salvata: <b>{$text}</b>\n\nOra inserisci <b>data e ora</b> dell'evento nel formato:\n<code>GG/MM/AAAA HH:MM</code>\n\nEsempio: <code>25/12/2024 20:00</code>";
+            return tgHtml(
+                "Descrizione salvata: <b>{desc}</b>\n\nOra inserisci <b>data e ora</b> dell'evento nel formato:\n<code>GG/MM/AAAA HH:MM</code>\n\nEsempio: <code>25/12/2024 20:00</code>",
+                ['desc' => $text]
+            );
 
         case 'waiting_event_datetime':
             // Parsing data/ora
             $parsed = DateTime::createFromFormat('d/m/Y H:i', $text);
             if (!$parsed) {
-                return "Formato data non valido. Usa il formato <code>GG/MM/AAAA HH:MM</code>\nEsempio: <code>25/12/2024 20:00</code>";
+                return tgHtml("Formato data non valido. Usa il formato <code>GG/MM/AAAA HH:MM</code>\nEsempio: <code>25/12/2024 20:00</code>");
             }
 
             if ($parsed <= new DateTime()) {
-                return "La data inserita è già passata.\n\nInserisci una data futura nel formato <code>GG/MM/AAAA HH:MM</code>";
+                return tgHtml("La data inserita è già passata.\n\nInserisci una data futura nel formato <code>GG/MM/AAAA HH:MM</code>");
             }
 
             $data['data_ora'] = $parsed->format('Y-m-d H:i:s');
             $data['data_ora_display'] = $parsed->format('d/m/Y H:i');
             setUserState($chatId, $userId, 'waiting_event_cost', $data);
-            return "Data salvata: <b>{$data['data_ora_display']}</b>\n\nOra inserisci il <b>costo di partecipazione</b> in euro (es: 15 oppure 0 se gratuito):";
+            return tgHtml(
+                "Data salvata: <b>{dataora}</b>\n\nOra inserisci il <b>costo di partecipazione</b> in euro (es: 15 oppure 0 se gratuito):",
+                ['dataora' => $data['data_ora_display']]
+            );
 
         case 'waiting_event_cost':
             $costo = str_replace(',', '.', $text);
@@ -181,11 +190,18 @@ function handleEventCreation($message) {
 
             $costoStr = $data['costo'] > 0 ? number_format($data['costo'], 2, ',', '.') . " euro" : "Gratuito";
 
-            return "Evento creato con successo!\n\n" .
-                   "<b>{$data['descrizione']}</b>\n" .
-                   "Data: {$data['data_ora_display']}\n" .
-                   "Costo: {$costoStr}\n\n" .
-                   "Gli utenti possono iscriversi con /partecipo";
+            return tgHtml(
+                "Evento creato con successo!\n\n" .
+                "<b>{desc}</b>\n" .
+                "Data: {dataora}\n" .
+                "Costo: {costo}\n\n" .
+                "Gli utenti possono iscriversi con /partecipo",
+                [
+                    'desc'    => $data['descrizione'],
+                    'dataora' => $data['data_ora_display'],
+                    'costo'   => $costoStr,
+                ]
+            );
     }
 
     return null;
@@ -834,24 +850,26 @@ function handleEventModification($message) {
 
     switch ($state) {
         case 'modifica_evento_descrizione':
+            // Descrizioni plain text: rimuovi eventuali tag HTML dall'input.
+            $text = strip_tags($text);
             $stmt = $db->prepare("UPDATE eventi SET descrizione = :val WHERE id = :id");
             $stmt->bindValue(':val', $text, SQLITE3_TEXT);
             $stmt->bindValue(':id', $eventoId, SQLITE3_INTEGER);
             $stmt->execute();
             clearUserState($chatId, $userId);
-            return "Descrizione aggiornata: <b>{$text}</b>";
+            return tgHtml("Descrizione aggiornata: <b>{desc}</b>", ['desc' => $text]);
 
         case 'modifica_evento_data_ora':
             $parsed = DateTime::createFromFormat('d/m/Y H:i', $text);
             if (!$parsed) {
-                return "Formato data non valido. Usa il formato <code>GG/MM/AAAA HH:MM</code>";
+                return tgHtml("Formato data non valido. Usa il formato <code>GG/MM/AAAA HH:MM</code>");
             }
             $stmt = $db->prepare("UPDATE eventi SET data_ora = :val WHERE id = :id");
             $stmt->bindValue(':val', $parsed->format('Y-m-d H:i:s'), SQLITE3_TEXT);
             $stmt->bindValue(':id', $eventoId, SQLITE3_INTEGER);
             $stmt->execute();
             clearUserState($chatId, $userId);
-            return "Data aggiornata: <b>" . $parsed->format('d/m/Y H:i') . "</b>";
+            return tgHtml("Data aggiornata: <b>{dataora}</b>", ['dataora' => $parsed->format('d/m/Y H:i')]);
 
         case 'modifica_evento_costo':
             $costo = str_replace(',', '.', $text);
@@ -864,7 +882,7 @@ function handleEventModification($message) {
             $stmt->execute();
             clearUserState($chatId, $userId);
             $costoStr = floatval($costo) > 0 ? number_format(floatval($costo), 2, ',', '.') . " euro" : "Gratuito";
-            return "Costo aggiornato: <b>{$costoStr}</b>";
+            return tgHtml("Costo aggiornato: <b>{costo}</b>", ['costo' => $costoStr]);
     }
 
     return null;
@@ -1058,7 +1076,8 @@ function _ospite($text, $chatID, $userId, $userName) {
         return "Usa /ospite seguito dal nome dell'ospite.\nEsempio: <code>/ospite Mario Rossi</code>";
     }
 
-    $nomeOspite = trim($parts[1]);
+    // Nome ospite plain text: rimuovi eventuali tag HTML dall'input.
+    $nomeOspite = strip_tags(trim($parts[1]));
 
     // Verifica che l'utente sia iscritto ad almeno un evento
     $partecipazioni = getPartecipazioniUtente($chatID, $userId);
