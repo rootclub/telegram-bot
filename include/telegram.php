@@ -26,9 +26,16 @@ final class TelegramHtml {
     public function __toString(): string { return $this->raw; }
 }
 
-/** Escape minimo richiesto da Telegram HTML: &, <, >. ENT_QUOTES per sicurezza attributi. */
+/**
+ * Escape solo dei 3 caratteri richiesti da Telegram HTML: &, <, >.
+ * NON escapa ' né " perché Telegram non riconosce &apos; e li renderizzerebbe
+ * letteralmente (trovato in produzione nel saluto serale: "l'uomo" → "l&apos;uomo").
+ * Per gli attributi (es. href="..."), l'escape del " è responsabilità del builder
+ * che costruisce il tag.
+ * L'ordine è critico: & PRIMA, altrimenti < diventerebbe &amp;lt;.
+ */
 function escapeHtmlForTelegram(string $text): string {
-    return htmlspecialchars($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    return str_replace(['&', '<', '>'], ['&amp;', '&lt;', '&gt;'], $text);
 }
 
 /** Escape e fallback per first_name/last_name Telegram. Ritorna TelegramHtml. */
