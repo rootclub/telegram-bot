@@ -161,12 +161,9 @@ function dispatchIntent(string $message, array $ctx): void {
             // Messaggio di stato (es. "Sto cercando informazioni su X...")
             $statusMessageId = null;
             if ($enrichmentResult && !empty($enrichmentResult['status_message'])) {
-                $statusResult = makeAPIRequest('sendMessage', [
-                    'chat_id' => $ctx['chatID'],
-                    'text' => $enrichmentResult['status_message'],
-                ]);
-                if ($statusResult && $statusResult['ok']) {
-                    $statusMessageId = $statusResult['result']['message_id'];
+                $statusResult = sendTelegramMessage($ctx['chatID'], $enrichmentResult['status_message']);
+                if ($statusResult['ok']) {
+                    $statusMessageId = $statusResult['message_id'];
                 }
             }
 
@@ -192,10 +189,7 @@ function dispatchIntent(string $message, array $ctx): void {
 
     } catch (\Throwable $e) {
         error_log("[dispatcher] Handler error for intent '{$intentId}': " . $e->getMessage());
-        makeAPIRequest('sendMessage', [
-            'chat_id' => $ctx['chatID'],
-            'text' => "Si è verificato un errore durante l'elaborazione.",
-        ]);
+        sendTelegramMessage($ctx['chatID'], "Si è verificato un errore durante l'elaborazione.");
     }
 }
 
@@ -209,45 +203,29 @@ function sendAgentResponse(?array $result, array $ctx): void {
 
     $response = $result['response'];
 
-    $messageParams = [
-        'chat_id' => $ctx['chatID'],
-        'text' => $response,
-        'parse_mode' => 'HTML',
-    ];
-
-    // Pulsante TTS
+    // Sentinel legacy: quando _ai_core() fallisce ritorna questa stringa esatta.
+    // Serve per skippare il pulsante TTS e non salvare nel contesto.
+    // TODO Step G: sostituire con flag esplicito $result['is_error'] per evitare
+    // il coupling string-literal tra ai.php e dispatcher.php.
     $isError = ($response === "Si è verificato un errore durante la comunicazione con l'AI.");
+
+    $options = ['parse_mode' => 'HTML'];
+
     if (TTS_ENABLED && !$isError) {
-        $messageParams['reply_markup'] = json_encode([
+        $options['reply_markup'] = json_encode([
             'inline_keyboard' => [[
                 ['text' => "\xF0\x9F\x94\x8A Ascolta", 'callback_data' => 'tts']
             ]]
         ]);
     }
 
-    // Reply in gruppo
     if ($ctx['chatType'] !== 'private') {
-        $messageParams['reply_to_message_id'] = $ctx['messageId'];
+        $options['reply_to_message_id'] = $ctx['messageId'];
     }
 
-    $sendResult = makeAPIRequest('sendMessage', $messageParams);
-
-    // Retry: messaggio originale eliminato
-    if (!$sendResult || !$sendResult['ok']) {
-        $errCode = $sendResult['error_code'] ?? 0;
-        $errDesc = $sendResult['description'] ?? '';
-
-        if ($errCode == 400 && strpos($errDesc, 'message to be replied not found') !== false) {
-            unset($messageParams['reply_to_message_id']);
-            $sendResult = makeAPIRequest('sendMessage', $messageParams);
-        }
-
-        // Retry: errore parse HTML
-        if (!$sendResult || !$sendResult['ok']) {
-            unset($messageParams['parse_mode']);
-            makeAPIRequest('sendMessage', $messageParams);
-        }
-    }
+    // Il wrapper gestisce automaticamente retry su reply_to_not_found e
+    // can't_parse_entities (plain fallback) + escape del testo LLM raw.
+    sendTelegramMessage($ctx['chatID'], $response, $options);
 
     // Salva risposta nel contesto
     if (!$isError) {
