@@ -56,7 +56,11 @@ PROMPT;
                 QBertClient::PRIORITY_NORMAL
             );
 
-            $matchResponse = stripThinkingTags($matchResult['response'] ?? '');
+            // llmResponseOrError evita l'accesso su null quando QBert fallisce;
+            // qui non vogliamo inviare un errore all'utente (proseguiamo con la
+            // fallback: "non ho trovato immagine corrispondente"), quindi non passiamo $chatId.
+            $matchText = llmResponseOrError($matchResult);
+            $matchResponse = $matchText !== null ? stripThinkingTags($matchText) : '';
 
             // Estrai il numero dalla risposta
             if (preg_match('/(\d+)/', $matchResponse, $m)) {

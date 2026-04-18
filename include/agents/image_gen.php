@@ -31,15 +31,16 @@ return [
             $count = (int)$stmt->execute()->fetchArray(SQLITE3_ASSOC)['cnt'];
             $log("Rate limit check: count={$count}, max={$maxPerHour}");
             if ($count >= $maxPerHour) {
-                $msgParams = [
-                    'chat_id' => $ctx['chatID'],
-                    'text' => "Hai gia' generato {$count} immagini nell'ultima ora. Il limite e' {$maxPerHour}/ora, riprova tra un po'!",
-                ];
+                $options = [];
                 if ($ctx['chatType'] !== 'private') {
-                    $msgParams['reply_to_message_id'] = $ctx['messageId'];
+                    $options['reply_to_message_id'] = $ctx['messageId'];
                 }
-                $sendResult = makeAPIRequest('sendMessage', $msgParams);
-                $log('Rate limit message sent: ' . json_encode($sendResult));
+                $sendResult = sendTelegramMessage(
+                    $ctx['chatID'],
+                    "Hai già generato {$count} immagini nell'ultima ora. Il limite è {$maxPerHour}/ora, riprova tra un po'!",
+                    $options
+                );
+                $log('Rate limit message sent: ok=' . ($sendResult['ok'] ? '1' : '0'));
                 return ['handled' => true];
             }
         } catch (\Throwable $e) {
@@ -50,14 +51,11 @@ return [
 
         $italianPrompt = trim($params['prompt'] ?? '');
         if ($italianPrompt === '') {
-            $msgParams = [
-                'chat_id' => $ctx['chatID'],
-                'text' => "Non ho capito cosa vuoi che disegni. Dimmi cosa vuoi vedere!",
-            ];
+            $options = [];
             if ($ctx['chatType'] !== 'private') {
-                $msgParams['reply_to_message_id'] = $ctx['messageId'];
+                $options['reply_to_message_id'] = $ctx['messageId'];
             }
-            makeAPIRequest('sendMessage', $msgParams);
+            sendTelegramMessage($ctx['chatID'], "Non ho capito cosa vuoi che disegni. Dimmi cosa vuoi vedere!", $options);
             return ['handled' => true];
         }
 
@@ -74,15 +72,12 @@ return [
             'action' => 'upload_photo',
         ]);
 
-        $statusParams = [
-            'chat_id' => $ctx['chatID'],
-            'text' => "Sto generando l'immagine...",
-        ];
+        $statusOptions = [];
         if ($ctx['chatType'] !== 'private') {
-            $statusParams['reply_to_message_id'] = $ctx['messageId'];
+            $statusOptions['reply_to_message_id'] = $ctx['messageId'];
         }
-        $statusMsg = makeAPIRequest('sendMessage', $statusParams);
-        $statusMessageId = ($statusMsg && $statusMsg['ok']) ? $statusMsg['result']['message_id'] : null;
+        $statusMsg = sendTelegramMessage($ctx['chatID'], "Sto generando l'immagine...", $statusOptions);
+        $statusMessageId = $statusMsg['ok'] ? $statusMsg['message_id'] : null;
 
         // Helper per cleanup su errore
         $cleanup = function () use ($ctx, &$statusMessageId) {

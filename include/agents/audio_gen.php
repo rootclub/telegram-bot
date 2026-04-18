@@ -87,14 +87,15 @@ return [
             $count = (int)$stmt->execute()->fetchArray(SQLITE3_ASSOC)['cnt'];
             $log("Rate limit check: count={$count}, max={$maxPerHour}");
             if ($count >= $maxPerHour) {
-                $msgParams = [
-                    'chat_id' => $ctx['chatID'],
-                    'text' => "Hai gia' composto {$count} brani nell'ultima ora. Il limite e' {$maxPerHour}/ora, riprova tra un po'!",
-                ];
+                $options = [];
                 if ($ctx['chatType'] !== 'private') {
-                    $msgParams['reply_to_message_id'] = $ctx['messageId'];
+                    $options['reply_to_message_id'] = $ctx['messageId'];
                 }
-                makeAPIRequest('sendMessage', $msgParams);
+                sendTelegramMessage(
+                    $ctx['chatID'],
+                    "Hai già composto {$count} brani nell'ultima ora. Il limite è {$maxPerHour}/ora, riprova tra un po'!",
+                    $options
+                );
                 return ['handled' => true];
             }
         } catch (\Throwable $e) {
@@ -104,14 +105,11 @@ return [
 
         $italianPrompt = trim($params['prompt'] ?? '');
         if ($italianPrompt === '') {
-            $msgParams = [
-                'chat_id' => $ctx['chatID'],
-                'text' => "Non ho capito che brano vuoi. Dimmi genere, mood, tema del testo!",
-            ];
+            $options = [];
             if ($ctx['chatType'] !== 'private') {
-                $msgParams['reply_to_message_id'] = $ctx['messageId'];
+                $options['reply_to_message_id'] = $ctx['messageId'];
             }
-            makeAPIRequest('sendMessage', $msgParams);
+            sendTelegramMessage($ctx['chatID'], "Non ho capito che brano vuoi. Dimmi genere, mood, tema del testo!", $options);
             return ['handled' => true];
         }
 
@@ -121,15 +119,12 @@ return [
             'action' => 'upload_voice',
         ]);
 
-        $statusParams = [
-            'chat_id' => $ctx['chatID'],
-            'text' => "Sto componendo il brano... ci vuole qualche minuto.",
-        ];
+        $statusOptions = [];
         if ($ctx['chatType'] !== 'private') {
-            $statusParams['reply_to_message_id'] = $ctx['messageId'];
+            $statusOptions['reply_to_message_id'] = $ctx['messageId'];
         }
-        $statusMsg = makeAPIRequest('sendMessage', $statusParams);
-        $statusMessageId = ($statusMsg && $statusMsg['ok']) ? $statusMsg['result']['message_id'] : null;
+        $statusMsg = sendTelegramMessage($ctx['chatID'], "Sto componendo il brano... ci vuole qualche minuto.", $statusOptions);
+        $statusMessageId = $statusMsg['ok'] ? $statusMsg['message_id'] : null;
 
         $cleanup = function () use ($ctx, &$statusMessageId) {
             if ($statusMessageId) {
