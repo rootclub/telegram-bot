@@ -150,6 +150,10 @@ function handleEventCreation($message) {
                 return "Formato data non valido. Usa il formato <code>GG/MM/AAAA HH:MM</code>\nEsempio: <code>25/12/2024 20:00</code>";
             }
 
+            if ($parsed <= new DateTime()) {
+                return "La data inserita è già passata.\n\nInserisci una data futura nel formato <code>GG/MM/AAAA HH:MM</code>";
+            }
+
             $data['data_ora'] = $parsed->format('Y-m-d H:i:s');
             $data['data_ora_display'] = $parsed->format('d/m/Y H:i');
             setUserState($chatId, $userId, 'waiting_event_cost', $data);
