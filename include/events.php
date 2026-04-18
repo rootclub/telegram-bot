@@ -56,11 +56,16 @@ function setUserState($chatId, $userId, $state, $data = null) {
     $stmt->execute();
 
     if ($state) {
-        $stmt = $db->prepare("INSERT INTO user_states (chat_id, user_id, state, data) VALUES (:chatId, :userId, :state, :data)");
+        // created_at va settato esplicitamente: la colonna è stata aggiunta via
+        // ALTER TABLE senza DEFAULT, e cleanupExpiredUserStates cancella i record
+        // con created_at IS NULL — quindi senza questo valore ogni stato multi-step
+        // veniva eliminato al messaggio successivo.
+        $stmt = $db->prepare("INSERT INTO user_states (chat_id, user_id, state, data, created_at) VALUES (:chatId, :userId, :state, :data, :created_at)");
         $stmt->bindValue(':chatId', $chatId, SQLITE3_INTEGER);
         $stmt->bindValue(':userId', $userId, SQLITE3_INTEGER);
         $stmt->bindValue(':state', $state, SQLITE3_TEXT);
         $stmt->bindValue(':data', $data ? json_encode($data) : null, SQLITE3_TEXT);
+        $stmt->bindValue(':created_at', time(), SQLITE3_INTEGER);
         $stmt->execute();
     }
 }
@@ -210,10 +215,8 @@ function _partecipo($chatID, $userId, $userName) {
         $keyboard[] = [['text' => $label, 'callback_data' => "partecipo_evento:{$evento['id']}"]];
     }
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "A quale evento vuoi partecipare?",
-        'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
+    sendTelegramMessage($chatID, "A quale evento vuoi partecipare?", [
+        'reply_markup' => json_encode(['inline_keyboard' => $keyboard]),
     ]);
 
     return null;
@@ -421,10 +424,8 @@ function _annullo_smart($chatID, $userId, $userName) {
         }
     }
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Cosa vuoi annullare?",
-        'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
+    sendTelegramMessage($chatID, "Cosa vuoi annullare?", [
+        'reply_markup' => json_encode(['inline_keyboard' => $keyboard]),
     ]);
 
     return null;
@@ -606,10 +607,8 @@ function _partecipanti($chatID) {
         $keyboard[] = [['text' => $label, 'callback_data' => "lista_partecipanti:{$evento['id']}"]];
     }
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Di quale evento vuoi vedere i partecipanti?",
-        'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
+    sendTelegramMessage($chatID, "Di quale evento vuoi vedere i partecipanti?", [
+        'reply_markup' => json_encode(['inline_keyboard' => $keyboard]),
     ]);
 
     return null;
@@ -731,10 +730,8 @@ function _modifica_evento($chatID, $userId, $chatType) {
         $keyboard[] = [['text' => $label, 'callback_data' => "modifica_evento_select:{$evento['id']}"]];
     }
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Quale evento vuoi modificare?",
-        'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
+    sendTelegramMessage($chatID, "Quale evento vuoi modificare?", [
+        'reply_markup' => json_encode(['inline_keyboard' => $keyboard]),
     ]);
 
     return null;
@@ -750,10 +747,8 @@ function mostraOpzioniModifica($eventoId, $chatId) {
         [['text' => 'Costo', 'callback_data' => "modifica_campo:costo:{$eventoId}"]]
     ];
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatId,
-        'text' => "Cosa vuoi modificare?",
-        'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
+    sendTelegramMessage($chatId, "Cosa vuoi modificare?", [
+        'reply_markup' => json_encode(['inline_keyboard' => $keyboard]),
     ]);
 
     return null;
@@ -905,10 +900,8 @@ function _chiudi_evento($chatID, $userId, $chatType) {
         $keyboard[] = [['text' => $label, 'callback_data' => "chiudi_evento_select:{$evento['id']}"]];
     }
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Quale evento vuoi chiudere?",
-        'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
+    sendTelegramMessage($chatID, "Quale evento vuoi chiudere?", [
+        'reply_markup' => json_encode(['inline_keyboard' => $keyboard]),
     ]);
 
     return null;
@@ -925,10 +918,10 @@ function chiediConfermaChiusura($evento, $chatId) {
         ]
     ];
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatId,
-        'text' => "Sei sicuro di voler chiudere l'evento <b>{$evento['descrizione']}</b>?\n\nTutti i partecipanti e gli ospiti verranno rimossi.",
-        'parse_mode' => 'HTML',
+    sendTelegramMessage($chatId, tgHtml(
+        "Sei sicuro di voler chiudere l'evento <b>{desc}</b>?\n\nTutti i partecipanti e gli ospiti verranno rimossi.",
+        ['desc' => $evento['descrizione']]
+    ), [
         'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
     ]);
 
@@ -1086,10 +1079,10 @@ function _ospite($text, $chatID, $userId, $userName) {
     // Salva il nome ospite nello stato per recuperarlo dopo
     setUserState($chatID, $userId, 'waiting_ospite_evento', ['nome_ospite' => $nomeOspite, 'invitante_name' => $userName]);
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "A quale evento vuoi aggiungere <b>{$nomeOspite}</b>?",
-        'parse_mode' => 'HTML',
+    sendTelegramMessage($chatID, tgHtml(
+        "A quale evento vuoi aggiungere <b>{nome}</b>?",
+        ['nome' => $nomeOspite]
+    ), [
         'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
     ]);
 
@@ -1193,10 +1186,8 @@ function _annullo_ospite($chatID, $userId, $userName) {
         $keyboard[] = [['text' => $label, 'callback_data' => "annullo_ospite:{$o['id']}"]];
     }
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Quale ospite vuoi rimuovere?",
-        'reply_markup' => json_encode(['inline_keyboard' => $keyboard])
+    sendTelegramMessage($chatID, "Quale ospite vuoi rimuovere?", [
+        'reply_markup' => json_encode(['inline_keyboard' => $keyboard]),
     ]);
 
     return null;

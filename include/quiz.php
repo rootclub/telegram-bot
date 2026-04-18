@@ -213,12 +213,9 @@ function generateAndSendQuiz($chatId, $topic, $userId, $userName) {
     }
 
     // Invia messaggio di stato iniziale
-    $statusResult = makeAPIRequest('sendMessage', [
-        'chat_id' => $chatId,
-        'text' => "Sto preparando un quiz su $topic..."
-    ]);
-    if ($statusResult && $statusResult['ok']) {
-        $statusMessageId = $statusResult['result']['message_id'];
+    $statusResult = sendTelegramMessage($chatId, "Sto preparando un quiz su $topic...");
+    if ($statusResult['ok']) {
+        $statusMessageId = $statusResult['message_id'];
     }
 
     file_put_contents($logFile, "\n" . str_repeat('=', 60) . "\n", FILE_APPEND);

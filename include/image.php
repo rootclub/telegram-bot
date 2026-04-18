@@ -44,10 +44,7 @@ function cleanupExpiredUserStates() {
         foreach ($expiredStates as $state) {
             image_log("cleanupExpiredUserStates: processing expired state chat_id={$state['chat_id']}, state={$state['state']}");
             if ($state['state'] == 'waiting_images' || $state['state'] == 'waiting_menu_images') {
-                $result = makeAPIRequest('sendMessage', [
-                    'chat_id' => $state['chat_id'],
-                    'text' => "Timeout: inserimento immagini menu annullato per inattività (10 minuti)."
-                ]);
+                $result = sendTelegramMessage($state['chat_id'], "Timeout: inserimento immagini menu annullato per inattività (10 minuti).");
                 image_log("cleanupExpiredUserStates: notified chat_id={$state['chat_id']}, result=" . json_encode($result));
             }
         }
