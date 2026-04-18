@@ -62,6 +62,18 @@ if (isset($update['message'])) {
     $messageText = str_replace('@bot', '', $messageText);
     $messageText = str_replace('@root', '', $messageText);
 
+    // Skip vision quando qualcuno in chat sta caricando immagini menu pappatoia:
+    // in quel flusso l'analisi è lavoro amministrativo e la vision (3-10s via QBert)
+    // ritardava inutilmente il feedback "immagine salvata".
+    // Gli stati pappatoia in orders.php sono chat-wide (senza user_id), quindi
+    // filtro solo per chat_id — diversamente da getUserState() che vuole user_id.
+    $skipVision = false;
+    $stateStmt = $db->prepare("SELECT 1 FROM user_states WHERE chat_id = :chat_id AND state IN ('waiting_images', 'waiting_menu_images') LIMIT 1");
+    $stateStmt->bindValue(':chat_id', $groupId, SQLITE3_INTEGER);
+    if ($stateStmt->execute()->fetchArray(SQLITE3_ASSOC)) {
+        $skipVision = true;
+    }
+
     // PRIMA: Gestisci immagini - analizza e salva nel contesto PRIMA di processMessage
     // Così l'AI avrà il contesto dell'immagine quando risponde
     $botImageAnalysis = null; // Analisi del bot da salvare separatamente
@@ -71,7 +83,7 @@ if (isset($update['message'])) {
         $caption = $message['caption'] ?? '';
 
         // Analizza l'immagine con AI vision (passa anche la caption per contesto)
-        $imageDescription = analyzeImage($fileId, $caption, $groupId);
+        $imageDescription = $skipVision ? null : analyzeImage($fileId, $caption, $groupId);
 
         // Messaggio utente: ha condiviso un'immagine (+ eventuale caption)
         if ($caption) {
@@ -118,8 +130,8 @@ if (isset($update['message'])) {
         $caption = $message['caption'] ?? '';
         file_put_contents(logPath('debug'), "Processing document image, caption=" . substr($caption, 0, 50) . "\n", FILE_APPEND);
 
-        $imageDescription = analyzeImage($fileId, $caption, $groupId);
-        file_put_contents(logPath('debug'), "analyzeImage returned: " . ($imageDescription ? "OK (" . strlen($imageDescription) . " chars)" : "NULL") . "\n", FILE_APPEND);
+        $imageDescription = $skipVision ? null : analyzeImage($fileId, $caption, $groupId);
+        file_put_contents(logPath('debug'), "analyzeImage returned: " . ($imageDescription ? "OK (" . strlen($imageDescription) . " chars)" : ($skipVision ? "SKIPPED (menu upload state)" : "NULL")) . "\n", FILE_APPEND);
 
         // Messaggio utente: ha condiviso un'immagine (+ eventuale caption)
         if ($caption) {
