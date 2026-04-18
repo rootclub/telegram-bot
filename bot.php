@@ -110,10 +110,8 @@ if (isset($update['message'])) {
 
             // Rispondi con l'analisi in chat privata o quando menzionato nel gruppo
             if ($chatType == 'private' || $captionMentionsBot) {
-                makeAPIRequest('sendMessage', [
-                    'chat_id' => $groupId,
-                    'text' => $imageDescription,
-                    'reply_to_message_id' => $message['message_id']
+                sendTelegramMessage($groupId, $imageDescription, [
+                    'reply_to_message_id' => $message['message_id'],
                 ]);
             }
         }
@@ -156,10 +154,8 @@ if (isset($update['message'])) {
             );
 
             if ($chatType == 'private' || $captionMentionsBot) {
-                makeAPIRequest('sendMessage', [
-                    'chat_id' => $groupId,
-                    'text' => $imageDescription,
-                    'reply_to_message_id' => $message['message_id']
+                sendTelegramMessage($groupId, $imageDescription, [
+                    'reply_to_message_id' => $message['message_id'],
                 ]);
             }
         }
@@ -218,10 +214,8 @@ if (isset($update['message'])) {
             $imageAnswer = analyzeImage($replyFileId, $question, $groupId);
 
             if ($imageAnswer) {
-                makeAPIRequest('sendMessage', [
-                    'chat_id' => $groupId,
-                    'text' => $imageAnswer,
-                    'reply_to_message_id' => $message['message_id']
+                sendTelegramMessage($groupId, $imageAnswer, [
+                    'reply_to_message_id' => $message['message_id'],
                 ]);
                 saveMessageToContext($groupId, 'rootbot', "[risposta su immagine: $imageAnswer]");
                 // Aggiorna descrizione nel log immagini
