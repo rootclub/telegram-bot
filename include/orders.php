@@ -187,10 +187,8 @@ function richiedi_selezione_pappatoia($orderId, $item, $chatID) {
         'inline_keyboard' => $keyboard
     ];
     
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Ho aggiunto '$item' all'ordine. Per favore, seleziona l'asporto per questo ordine:",
-        'reply_markup' => json_encode($replyMarkup)
+    sendTelegramMessage($chatID, "Ho aggiunto '$item' all'ordine. Per favore, seleziona l'asporto per questo ordine:", [
+        'reply_markup' => json_encode($replyMarkup),
     ]);
     
     return null; // Ritorniamo null perché abbiamo già inviato il messaggio
@@ -454,10 +452,8 @@ function nuova_pappatoia($chat_id, $message_id, $text) {
     
     // Richiedi l'immagine
     $response = "Asporto '$pappatoia_name' aggiunto con indirizzo: $indirizzo, telefono: $telefono e giorni di chiusura: $giorni_chiusura. Ora invia le immagini per il menu UNA alla volta. Invia /fine quando hai terminato.";
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chat_id,
-        'text' => $response,
-        'reply_to_message_id' => $message_id
+    sendTelegramMessage($chat_id, $response, [
+        'reply_to_message_id' => $message_id,
     ]);
     
     // Imposta lo stato dell'utente per aspettare le immagini
@@ -543,10 +539,8 @@ function nuovo_menu($chatID, $fromId) {
         'inline_keyboard' => $keyboard
     ];
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Seleziona l'asporto di cui vuoi aggiornare il menu:",
-        'reply_markup' => json_encode($replyMarkup)
+    sendTelegramMessage($chatID, "Seleziona l'asporto di cui vuoi aggiornare il menu:", [
+        'reply_markup' => json_encode($replyMarkup),
     ]);
 
     return null;
@@ -722,10 +716,8 @@ function menu($text, $chatId, $userId, $messageId) {
         }
         
         // Invia un messaggio di conferma nel gruppo
-        makeAPIRequest('sendMessage', [
-            'chat_id' => $chatId,
-            'text' => "Ho inviato le informazioni del menu in privato.",
-            'reply_to_message_id' => $messageId
+        sendTelegramMessage($chatId, "Ho inviato le informazioni del menu in privato.", [
+            'reply_to_message_id' => $messageId,
         ]);
     }
     
@@ -793,10 +785,8 @@ function elenco_pappatoie($chatID) {
         'inline_keyboard' => $keyboard
     ];
     
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Seleziona un asporto aperto oggi di cui vedere il menu:",
-        'reply_markup' => json_encode($replyMarkup)
+    sendTelegramMessage($chatID, "Seleziona un asporto aperto oggi di cui vedere il menu:", [
+        'reply_markup' => json_encode($replyMarkup),
     ]);
     
     return null;
@@ -841,15 +831,9 @@ function handle_show_pappatoia_images($callbackQuery) {
     ]);
     
     if (empty($immagini)) {
-        makeAPIRequest('sendMessage', [
-            'chat_id' => $callbackQuery['message']['chat']['id'],
-            'text' => "Non ci sono immagini del menu disponibili per $pappatoia."
-        ]);
+        sendTelegramMessage($callbackQuery['message']['chat']['id'], "Non ci sono immagini del menu disponibili per $pappatoia.");
     } else {
-        makeAPIRequest('sendMessage', [
-            'chat_id' => $callbackQuery['message']['chat']['id'],
-            'text' => "Menu di $pappatoia:"
-        ]);
+        sendTelegramMessage($callbackQuery['message']['chat']['id'], "Menu di $pappatoia:");
         foreach ($immagini as $image) {
             $image_path = IMAGE_SAVE_PATH . $image;
             if (file_exists($image_path)) {
@@ -897,10 +881,8 @@ function _pappatoia($chatID) {
         'inline_keyboard' => $keyboard
     ];
     
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Seleziona l'asporto aperto oggi per l'ordine di oggi:",
-        'reply_markup' => json_encode($replyMarkup)
+    sendTelegramMessage($chatID, "Seleziona l'asporto aperto oggi per l'ordine di oggi:", [
+        'reply_markup' => json_encode($replyMarkup),
     ]);
     
     return null;
@@ -1146,10 +1128,8 @@ function elimina_pappatoia($chatID, $fromId) {
         'inline_keyboard' => $keyboard
     ];
 
-    makeAPIRequest('sendMessage', [
-        'chat_id' => $chatID,
-        'text' => "Seleziona l'asporto da eliminare:",
-        'reply_markup' => json_encode($replyMarkup)
+    sendTelegramMessage($chatID, "Seleziona l'asporto da eliminare:", [
+        'reply_markup' => json_encode($replyMarkup),
     ]);
 
     return null;
