@@ -81,9 +81,11 @@ function pickNextUser() {
             FROM (
                 SELECT user_id, user_name, timestamp FROM contesto_chat
                 WHERE user_id IS NOT NULL AND length(message_text) >= :min_len
+                  AND ltrim(message_text) NOT GLOB '/*'
                 UNION ALL
                 SELECT user_id, user_name, timestamp FROM storico_messaggi
                 WHERE user_id IS NOT NULL AND length(message_text) >= :min_len
+                  AND ltrim(message_text) NOT GLOB '/*'
             )
             GROUP BY user_id
             HAVING total >= :min_msgs
@@ -93,18 +95,23 @@ function pickNextUser() {
             -- Escludi utenti col profilo completamente processato (cursore profilo aggiornato).
             -- Bot prompt e nickname vengono comunque tentati ad ogni giro,
             -- le rispettive funzioni sono no-op se non c'è nulla da fare.
+            -- I filtri (length, NOT GLOB '/*') devono combaciare con quelli di
+            -- getUnprocessedUserMessages: altrimenti l'utente viene scelto ma
+            -- i 3 batch ritornano subito no_messages (giro a vuoto ogni 5 min).
             SELECT mu.user_id FROM memorie_utenti mu
             WHERE NOT EXISTS (
                 SELECT 1 FROM contesto_chat cc
                 WHERE cc.user_id = mu.user_id
                   AND cc.timestamp > mu.last_processed_msg_id
                   AND length(cc.message_text) >= :min_len
+                  AND ltrim(cc.message_text) NOT GLOB '/*'
             )
             AND NOT EXISTS (
                 SELECT 1 FROM storico_messaggi sm
                 WHERE sm.user_id = mu.user_id
                   AND sm.timestamp > mu.last_processed_msg_id
                   AND length(sm.message_text) >= :min_len
+                  AND ltrim(sm.message_text) NOT GLOB '/*'
             )
         )
         ORDER BY u.recent_activity DESC, pending DESC
