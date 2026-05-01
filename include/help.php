@@ -32,7 +32,7 @@ Posso aiutare per raccogliere gli ordini per le cene al root, ecco i comandi:
 /elimina_asporto - elimina un locale da asporto dai predefiniti (solo admin)
 
 Posso anche gestire eventi speciali (corsi, cene, talk):
-/evento - crea un nuovo evento con descrizione, data/ora e costo (solo admin)
+/evento - avvia la creazione guidata di un evento: ti chiedo descrizione, data/ora e costo uno alla volta (solo admin)
 /partecipo - iscriviti a un evento
 /partecipanti - mostra info evento e la lista dei partecipanti
 /ospite [nome] - aggiungi un ospite (moglie, figli, ecc.) a un evento

@@ -214,6 +214,9 @@ function processMessage($message) {
         $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
         $response = _evento($chatID, $fromId, $userName, $chatType);
 
+    } elseif (preg_match('#^/evento(?:@rootbotbot)?\s+\S#', $text)) {
+        $response = "/evento non vuole argomenti, te li chiedo io.";
+
     } elseif ($text == '/partecipo' || $text == '/partecipo@rootbotbot') {
         $userName = $message['from']['first_name'] . ' ' . ($message['from']['last_name'] ?? '');
         $response = _partecipo($chatID, $fromId, $userName);
