@@ -17,9 +17,17 @@ $gen3dHandler = function (array $ctx, array $params): ?array {
 
     $log('Handler called, user=' . $ctx['fromId'] . ', params=' . json_encode($params, JSON_UNESCAPED_UNICODE));
 
+    // --- Modalità HQ: attiva TRELLIS.2 al posto di ComfyUI/Hunyuan3D ---
+    $raw = $ctx['raw'] ?? null;
+    $rawText = $raw['text'] ?? $raw['caption'] ?? '';
+    $hqPattern = '/\b(hq|alta\s+qualit[aà]|qualit[aà]\s+(?:superiore|alta|massima)|high\s+quality|massima\s+qualit[aà])\b/iu';
+    $useHQ = $rawText !== '' && (bool)preg_match($hqPattern, $rawText);
+    if ($useHQ) {
+        $log('HQ mode enabled (TRELLIS.2)');
+    }
+
     // --- Step 0: risolvi file_id dell'immagine sorgente ---
     $fileId = null;
-    $raw = $ctx['raw'] ?? null;
 
     // (1) Reply a foto/documento immagine
     if ($raw && isset($raw['reply_to_message'])) {
@@ -129,7 +137,10 @@ PROMPT;
     if ($ctx['chatType'] !== 'private') {
         $statusOptions['reply_to_message_id'] = $ctx['messageId'];
     }
-    $statusMsg = sendTelegramMessage($ctx['chatID'], "Sto generando il modello 3D... ci vuole qualche minuto.", $statusOptions);
+    $statusText = $useHQ
+        ? "Sto generando il modello 3D in alta qualità... ci vuole qualche minuto."
+        : "Sto generando il modello 3D... ci vuole un minuto.";
+    $statusMsg = sendTelegramMessage($ctx['chatID'], $statusText, $statusOptions);
     $statusMessageId = $statusMsg['ok'] ? $statusMsg['message_id'] : null;
 
     $cleanup = function () use ($ctx, &$statusMessageId) {
@@ -161,9 +172,40 @@ PROMPT;
     $tmpImg = tempnam(sys_get_temp_dir(), 'gen3d_') . '.' . $ext;
     file_put_contents($tmpImg, $imageBytes);
 
-    // --- Step 2: upload immagine a ComfyUI (/upload/image, multipart) ---
     $qbert = getQBertClient();
     $mime = 'image/' . ($ext === 'jpg' ? 'jpeg' : $ext);
+    $glbBytes = null;
+
+    // --- Branch HQ: TRELLIS.2 via QBert (sync, ~60s, ritorna direttamente il GLB) ---
+    if ($useHQ) {
+        $trellisResult = $qbert->post(
+            'trellis',
+            '/generate',
+            null,
+            QBertClient::PRIORITY_NORMAL,
+            '',
+            [
+                'image' => new \CURLFile($tmpImg, $mime, 'input.' . $ext),
+                'resolution' => '1024',
+                'seed' => (string)random_int(0, 2147483647),
+                'decimation_target' => '500000',
+                'texture_size' => '2048',
+            ]
+        );
+        @unlink($tmpImg);
+
+        if (($trellisResult['status_code'] ?? 0) !== 200 || empty($trellisResult['body_bytes'])) {
+            $cleanup();
+            $log('TRELLIS.2 generate failed: ' . json_encode([
+                'status' => $trellisResult['status_code'] ?? null,
+                'body' => substr($trellisResult['body'] ?? '', 0, 500),
+            ]));
+            return ['response' => "Errore nella generazione 3D in alta qualità. Riprova più tardi."];
+        }
+        $glbBytes = $trellisResult['body_bytes'];
+        $log('TRELLIS.2 GLB ricevuto, bytes=' . strlen($glbBytes));
+    } else {
+    // --- Branch standard: upload immagine a ComfyUI (/upload/image, multipart) ---
     $uploadResult = $qbert->post(
         'comfyui',
         '/upload/image',
@@ -211,16 +253,14 @@ PROMPT;
     $log("Submitted to ComfyUI, prompt_id={$promptId}");
 
     // --- Step 5: poll /history ---
+    // Niente timeout locale: il QBertClient gestisce già attesa/timeout (600s),
+    // e in coda ComfyUI l'attesa legittima può superare i limiti locali.
     $lastActionTime = time();
-    $start = microtime(true);
-    $maxWait = 300.0;
     $pollInterval = 3.0;
     $outputFilename = null;
     $outputSubfolder = '';
 
     while (true) {
-        if ((microtime(true) - $start) > $maxWait) break;
-
         if ((time() - $lastActionTime) >= 3) {
             makeAPIRequest('sendChatAction', [
                 'chat_id' => $ctx['chatID'],
@@ -272,6 +312,8 @@ PROMPT;
         ]));
         return ['response' => "Errore nel recupero del modello 3D."];
     }
+    $glbBytes = $viewResult['body_bytes'];
+    } // fine branch ComfyUI
 
     // --- Step 7: salva in /models/{uuid}.glb (servito da viewer.php) e invia ---
     $modelsDir = dirname(__DIR__, 3) . '/models';
@@ -288,7 +330,7 @@ PROMPT;
 
     $modelId = bin2hex(random_bytes(16));
     $glbPath = $modelsDir . '/' . $modelId . '.glb';
-    if (file_put_contents($glbPath, $viewResult['body_bytes']) === false) {
+    if (file_put_contents($glbPath, $glbBytes) === false) {
         $cleanup();
         $log('Failed to save GLB to ' . $glbPath);
         return ['response' => "Errore nel salvataggio del modello 3D."];
@@ -351,6 +393,7 @@ return [
     'help' => "Generazione modelli 3D:
 Rispondi a una foto scrivendo 'rootbot trasforma in 3D' (o 'converti in 3D' in chat privata)
 Oppure: 'rootbot trasforma in 3D l'immagine con il gattino verde' — cerca tra le foto recenti
+Per qualità superiore aggiungi 'HQ' o 'alta qualità' (TRELLIS.2, mesh e texture migliori)
 Output: file .glb (apribile con qualsiasi viewer 3D)
 Limite: 6 modelli/ora per utente",
     'schema' => function (SQLite3 $db): void {
