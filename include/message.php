@@ -71,6 +71,16 @@ function sendPrivateResponse($userId, $text, $chatId = null) {
 function processMessage($message) {
     $chatID = $message['chat']['id'];
     $text = $message['text'] ?? '';
+    // Normalizza in minuscolo SOLO il token-comando iniziale (es. "/Menu Pizzeria"
+    // -> "/menu Pizzeria"), preservando gli argomenti che possono essere
+    // case-sensitive. Cosi' /MENU, /Menu, /menu sono tutti equivalenti.
+    if ($text !== '' && $text[0] === '/') {
+        $text = preg_replace_callback(
+            '/^(\/\S+)/u',
+            fn($m) => mb_strtolower($m[1], 'UTF-8'),
+            $text
+        );
+    }
     $caption = $message['caption'] ?? '';  // Caption per immagini/documenti
     $chatType = $message['chat']['type'];
     $fromId = $message['from']['id'];
