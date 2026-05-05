@@ -59,6 +59,18 @@ $imageGenHandler = function (array $ctx, array $params): ?array {
             default     => [1024, 1024],
         };
 
+        // Modalità HQ: parole chiave che attivano il workflow ernie (più lento ma migliore)
+        $hqPattern = '/\b(hq|alta\s+qualit[aà]|qualit[aà]\s+(?:superiore|alta|massima)|high\s+quality|massima\s+qualit[aà])\b/iu';
+        $useHQ = (bool)preg_match($hqPattern, $italianPrompt);
+        $promptForLLM = $italianPrompt;
+        if ($useHQ) {
+            $stripped = trim(preg_replace($hqPattern, '', $italianPrompt));
+            if ($stripped !== '') {
+                $promptForLLM = $stripped;
+            }
+            $log('HQ mode enabled (ernie workflow)');
+        }
+
         // Status message + upload_photo action
         makeAPIRequest('sendChatAction', [
             'chat_id' => $ctx['chatID'],
@@ -69,7 +81,10 @@ $imageGenHandler = function (array $ctx, array $params): ?array {
         if ($ctx['chatType'] !== 'private') {
             $statusOptions['reply_to_message_id'] = $ctx['messageId'];
         }
-        $statusMsg = sendTelegramMessage($ctx['chatID'], "Sto generando l'immagine...", $statusOptions);
+        $statusText = $useHQ
+            ? "Sto generando l'immagine in alta qualità (può richiedere un paio di minuti)..."
+            : "Sto generando l'immagine...";
+        $statusMsg = sendTelegramMessage($ctx['chatID'], $statusText, $statusOptions);
         $statusMessageId = $statusMsg['ok'] ? $statusMsg['message_id'] : null;
 
         // Helper per cleanup su errore
@@ -111,7 +126,7 @@ SYS;
 
         $enhanceResult = callOllamaChatViaQBert(
             OLLAMA_MODEL_LIGHT,
-            $italianPrompt . $contextSection,
+            $promptForLLM . $contextSection,
             ollamaOptions(OLLAMA_MODEL_LIGHT_GPU),
             false,
             QBertClient::PRIORITY_NORMAL,
@@ -120,22 +135,37 @@ SYS;
 
         $englishPrompt = trim(stripThinkingTags($enhanceResult['response'] ?? ''));
         if ($englishPrompt === '') {
-            $englishPrompt = $italianPrompt; // fallback
+            $englishPrompt = $promptForLLM; // fallback
         }
 
         // --- Step 2: Carica e configura il workflow ---
-        $workflowPath = __DIR__ . '/workflows/z_image_turbo.json';
+        $workflowFile = $useHQ ? 'ernie_image_turbo.json' : 'z_image_turbo.json';
+        $workflowPath = __DIR__ . '/workflows/' . $workflowFile;
         $workflow = json_decode(file_get_contents($workflowPath), true);
         if (!$workflow) {
             $cleanup();
-            error_log('[image_gen] Failed to load workflow JSON');
+            error_log('[image_gen] Failed to load workflow JSON: ' . $workflowFile);
             return ['response' => "Errore interno: impossibile caricare il workflow di generazione."];
         }
 
-        $workflow['58']['inputs']['value'] = $englishPrompt;
-        $workflow['57:13']['inputs']['width'] = $width;
-        $workflow['57:13']['inputs']['height'] = $height;
-        $workflow['57:3']['inputs']['seed'] = random_int(0, 2147483647);
+        if ($useHQ) {
+            // Ernie Image Turbo: prompt node 88:94, size node 88:71 (+ mirror su 88:99/88:100
+            // usati dal prompt-enhancer interno), seed su 88:70, output SaveImage su node 73.
+            $workflow['88:94']['inputs']['value']  = $englishPrompt;
+            $workflow['88:71']['inputs']['width']  = $width;
+            $workflow['88:71']['inputs']['height'] = $height;
+            $workflow['88:99']['inputs']['source']  = $width;
+            $workflow['88:100']['inputs']['source'] = $height;
+            $workflow['88:70']['inputs']['seed']   = random_int(0, 2147483647);
+            $workflow['88:95']['inputs']['sampling_mode.seed'] = random_int(0, 2147483647);
+            $outputNodeKey = '73';
+        } else {
+            $workflow['58']['inputs']['value'] = $englishPrompt;
+            $workflow['57:13']['inputs']['width'] = $width;
+            $workflow['57:13']['inputs']['height'] = $height;
+            $workflow['57:3']['inputs']['seed'] = random_int(0, 2147483647);
+            $outputNodeKey = '9';
+        }
 
         // --- Step 3: Submit a ComfyUI via QBert ---
         $qbert = getQBertClient();
@@ -149,17 +179,13 @@ SYS;
         }
 
         // --- Step 4: Poll /history fino a output pronto ---
+        // Niente timeout locale: il QBertClient gestisce già attesa/timeout (600s),
+        // e in coda ComfyUI l'attesa legittima può superare i limiti locali.
         $lastActionTime = time();
-        $start = microtime(true);
-        $maxWait = 120.0;
         $pollInterval = 2.0;
         $outputFilename = null;
 
         while (true) {
-            if ((microtime(true) - $start) > $maxWait) {
-                break;
-            }
-
             // Refresh upload_photo ogni 3s
             if ((time() - $lastActionTime) >= 3) {
                 makeAPIRequest('sendChatAction', [
@@ -175,8 +201,8 @@ SYS;
 
             if (($historyResult['status_code'] ?? 0) === 200 && !empty($historyResult['json'])) {
                 $entry = $historyResult['json'][$promptId] ?? null;
-                if ($entry && isset($entry['outputs']['9']['images'][0]['filename'])) {
-                    $outputFilename = $entry['outputs']['9']['images'][0]['filename'];
+                if ($entry && isset($entry['outputs'][$outputNodeKey]['images'][0]['filename'])) {
+                    $outputFilename = $entry['outputs'][$outputNodeKey]['images'][0]['filename'];
                     break;
                 }
             }
@@ -248,13 +274,14 @@ return [
     'id' => 'image_gen',
     'description' => "L'utente chiede di generare, creare, disegnare o immaginare un'immagine, una foto, un disegno, un'illustrazione (es. 'genera un'immagine di...', 'disegna un gatto', 'fammi vedere un tramonto', 'crea un'illustrazione', 'immagina...')",
     'parameters' => [
-        'prompt' => "Descrizione dettagliata dell'immagine da generare, in italiano, come richiesto dall'utente",
+        'prompt' => "Descrizione dettagliata dell'immagine da generare, in italiano, come richiesto dall'utente. Preserva eventuali indicatori di qualità come 'HQ', 'alta qualità', 'qualità superiore' se presenti nel testo originale",
         'formato' => "Formato dell'immagine SE esplicitamente richiesto: 'landscape' (orizzontale/panorama), 'portrait' (verticale/ritratto) o 'square' (quadrato). Se l'utente non specifica il formato, usa 'square'",
     ],
     'sends_own_response' => true,
     'help' => "Generazione immagini:
 /genera [descrizione] - genera un'immagine dalla descrizione (es: /genera un gatto astronauta)
 Puoi aggiungere 'landscape' o 'portrait' per il formato (default: quadrato)
+Per qualità superiore aggiungi 'HQ' o 'alta qualità' (più lenta ma migliore)
 Puoi anche chiedere: 'rootbot disegna un tramonto sul mare'
 Limite: 6 immagini/ora per utente",
     'schema' => function (SQLite3 $db): void {
