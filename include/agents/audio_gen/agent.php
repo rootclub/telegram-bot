@@ -298,18 +298,14 @@ SYS;
         $log("Submitted to ComfyUI, prompt_id={$promptId}");
 
         // --- Step 5: Poll /history fino a output pronto ---
+        // Niente timeout locale: il QBertClient gestisce già attesa/timeout (600s),
+        // e in coda ComfyUI l'attesa legittima può superare i limiti locali.
         $lastActionTime = time();
-        $start = microtime(true);
-        $maxWait = 240.0;
         $pollInterval = 3.0;
         $outputFilename = null;
         $outputSubfolder = 'audio';
 
         while (true) {
-            if ((microtime(true) - $start) > $maxWait) {
-                break;
-            }
-
             if ((time() - $lastActionTime) >= 3) {
                 makeAPIRequest('sendChatAction', [
                     'chat_id' => $ctx['chatID'],
