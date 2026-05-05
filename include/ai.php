@@ -232,17 +232,13 @@ function callOllamaViaQBertWithTyping($requestData, $chatId, $priority = QBertCl
         return $result['json'] ?? null;
     }
 
-    // Polling manuale con typing refresh
+    // Polling manuale con typing refresh.
+    // Niente timeout locale: il ticket QBert gestisce già scadenze/abbandoni
+    // (poll restituirà found=false o failed=true quando serve uscire).
     $ticketId = $result['ticket_id'];
-    $start = microtime(true);
-    $maxWait = 600.0;
     $pollInterval = 1.0;
 
     while (true) {
-        if ((microtime(true) - $start) > $maxWait) {
-            return null; // Timeout
-        }
-
         // Rinnova typing ogni 3 secondi (margine sui 5s di Telegram)
         if ((time() - $lastTypingTime) >= 3) {
             makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
@@ -299,11 +295,9 @@ function callOllamaChatViaQBertWithTyping(string $model, string $prompt, int $ch
     if (!$result['is_ticket']) {
         $json = $result['json'] ?? null;
     } else {
+        // Niente timeout locale: il ticket QBert gestisce già scadenze/abbandoni.
         $ticketId = $result['ticket_id'];
-        $start = microtime(true);
-        $maxWait = 600.0;
         while (true) {
-            if ((microtime(true) - $start) > $maxWait) return null;
             if ((time() - $lastTypingTime) >= 3) {
                 makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'typing']);
                 $lastTypingTime = time();
@@ -832,7 +826,7 @@ function dumpChatContext($groupId) {
  * @param string $wikiSection Sezione wiki opzionale (da agente enrichment)
  * @return string Risposta generata
  */
-function _ai_core($chatID, $chatType, $message, $userName = 'Utente', $wikiSection = '') {
+function _ai_core($chatID, $chatType, $message, $userName = 'Utente', $wikiSection = '', $userId = null) {
     $model = OLLAMA_MODEL;
 
     // Mostra "sta scrivendo..." mentre l'LLM elabora
@@ -840,6 +834,19 @@ function _ai_core($chatID, $chatType, $message, $userName = 'Utente', $wikiSecti
         'chat_id' => $chatID,
         'action' => 'typing'
     ]);
+
+    // Personalizzazione per utente: se c'è un bot_prompt salvato, lo aggiungiamo
+    // alla persona per modulare stile/tono in base a chi parla.
+    $personalization = '';
+    if ($userId !== null) {
+        require_once __DIR__ . '/user_memory.php';
+        $profile = getUserMemoryProfile((int)$userId);
+        $botPrompt = trim($profile['bot_prompt'] ?? '');
+        if ($botPrompt !== '') {
+            $botPromptSanitized = sanitizeMessageForPrompt($botPrompt, true);
+            $personalization = "\n\n### COME INTERAGIRE CON {$userName} ###\n{$botPromptSanitized}";
+        }
+    }
 
     // Recupera contesto misto: gruppo + conversazione specifica
     $contexts = getChatContextMixed($chatID, $userName, 5, 5);
@@ -863,6 +870,7 @@ Info pratiche che conosci:
 - Sede di FoLug (Linux User Group di Forlì) e Precious Plastic Romagna
 - Frequentato da nerd, maker, smanettoni di tecnologia, elettronica, robotica, fantascienza
 INSTR;
+    $instructions .= $personalization;
     $message = str_replace('@rootbotbot', '', $message);
     $message = str_replace('rootbotbot', '', $message);
     $message = str_replace('@rootbot', '', $message);
@@ -940,8 +948,8 @@ PROMPT;
  * Wrapper di compatibilita': chiama _ai_core senza enrichment.
  * Usato da contesti che non passano dal dispatcher (es. immagini).
  */
-function _ai($chatID, $chatType, $message, $userName = 'Utente') {
-    return _ai_core($chatID, $chatType, $message, $userName);
+function _ai($chatID, $chatType, $message, $userName = 'Utente', $userId = null) {
+    return _ai_core($chatID, $chatType, $message, $userName, '', $userId);
 }
 
 /**
@@ -1715,17 +1723,14 @@ function generateTTSWithTyping($text, $chatId) {
         return null;
     }
 
-    // Ticket: polling manuale con typing refresh
+    // Ticket: polling manuale con typing refresh.
+    // Niente timeout locale: il ticket QBert gestisce già scadenze/abbandoni
+    // (poll restituirà found=false o failed=true quando serve uscire),
+    // e in coda GPU l'attesa legittima può superare qualsiasi limite locale.
     $ticketId = $result['ticket_id'];
-    $start = microtime(true);
-    $maxWait = 600.0;
     $pollInterval = 2.0;
 
     while (true) {
-        if ((microtime(true) - $start) > $maxWait) {
-            return null;
-        }
-
         // Rinnova typing ogni 4 secondi
         if ((time() - $lastTypingTime) >= 4) {
             makeAPIRequest('sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_voice']);

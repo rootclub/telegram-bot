@@ -14,7 +14,7 @@ return [
                 $wikiSection .= $e['prompt_section'];
             }
         }
-        $response = _ai_core($ctx['chatID'], $ctx['chatType'], $ctx['message'], $ctx['userName'], $wikiSection);
+        $response = _ai_core($ctx['chatID'], $ctx['chatType'], $ctx['message'], $ctx['userName'], $wikiSection, $ctx['fromId'] ?? null);
         return ['response' => $response];
     },
 ];
