@@ -97,9 +97,10 @@ function callOllamaViaQBert($requestData, $priority = QBertClient::PRIORITY_NORM
  * @param array  $options     Options Ollama (num_ctx, num_predict, temperature, ecc.)
  * @param bool|null $think    true/false per forzare; null per lasciare default modello
  * @param string $priority
+ * @param string|array|null $format  'json' o uno schema JSON per vincolare l'output; null = libero
  * @return array|null  ['response' => string, 'thinking' => string, 'done_reason' => ..., 'raw' => <full>]
  */
-function callOllamaChatViaQBert(string $model, string $prompt, array $options = [], ?bool $think = null, $priority = QBertClient::PRIORITY_NORMAL, ?string $system = null) {
+function callOllamaChatViaQBert(string $model, string $prompt, array $options = [], ?bool $think = null, $priority = QBertClient::PRIORITY_NORMAL, ?string $system = null, $format = null) {
     $qbert = getQBertClient();
 
     $messages = [];
@@ -116,6 +117,16 @@ function callOllamaChatViaQBert(string $model, string $prompt, array $options = 
     ];
     if ($think !== null) {
         $body['think'] = $think;
+    }
+    // ATTENZIONE: oggi QBert NON inoltra questo campo a Ollama, quindi passarlo non
+    // ha alcun effetto. Verificato con una sonda: un format volutamente invalido
+    // torna 200 (Ollama risponderebbe 400), mentre una temperature invalida torna
+    // 500 con l'errore di Ollama — quindi il body passa, ma `format` viene filtrato
+    // dall'allowlist del gateway. Il parametro resta qui, già cablato, per il giorno
+    // in cui QBert lo lascerà passare: da quel momento basta passarlo ai chiamanti
+    // che vogliono JSON garantito (hook e giudice del DJ, classifier del dispatcher).
+    if ($format !== null) {
+        $body['format'] = $format;
     }
 
     $result = $qbert->post('ollama', '/api/chat', $body, $priority);
@@ -1174,6 +1185,49 @@ if (!defined('DJ_PROFILE_MAX_CHARS'))   define('DJ_PROFILE_MAX_CHARS', 400); // 
 if (!defined('DJ_HN_MIN_HOURS'))        define('DJ_HN_MIN_HOURS', 8);        // tetto: max un post HN ogni N ore
 if (!defined('DJ_HN_QUIET_MINUTES'))    define('DJ_HN_QUIET_MINUTES', 45);   // silenzio richiesto per cambiare argomento con una notizia
 
+// Forma attesa delle risposte JSON di hook e giudice, scritta come JSON Schema.
+// NON è ancora in uso come `format` di Ollama: QBert filtra quel campo (vedi la
+// nota in callOllamaChatViaQBert). Quando il gateway lo inoltrerà, passarli come
+// settimo argomento della chiamata rende il vincolo reale invece che solo chiesto
+// a parole nel prompt. Nel frattempo restano la documentazione del contratto che
+// il parser qui sotto si aspetta.
+const DJ_HOOK_SCHEMA = [
+    'type' => 'object',
+    'properties' => [
+        'argomenti'       => ['type' => 'array', 'items' => ['type' => 'string']],
+        'c_e_materia'     => ['type' => 'boolean'],
+        'search_term'     => ['type' => 'string'],
+        'cosa_aggiungere' => ['type' => 'string'],
+    ],
+    'required' => ['argomenti', 'c_e_materia', 'search_term', 'cosa_aggiungere'],
+];
+
+const DJ_JUDGE_SCHEMA = [
+    'type' => 'object',
+    'properties' => [
+        'promosso' => ['type' => 'boolean'],
+        'motivo'   => ['type' => 'string'],
+    ],
+    'required' => ['promosso', 'motivo'],
+];
+
+/**
+ * Ripulisce un campo di memorie_utenti dal markdown prima di iniettarlo nel prompt.
+ * I profili sono prosa generata da LLM, piena di header e grassetti: iniettata così
+ * com'è insegna al modello a rispondere nello stesso registro, che è esattamente
+ * quello che non vogliamo quando gli chiediamo un JSON.
+ */
+function _djCleanProfileText(?string $text): string {
+    if ($text === null || trim($text) === '') {
+        return '';
+    }
+    $t = preg_replace('/^\s{0,3}#{1,6}\s*/mu', '', $text); // header markdown
+    $t = preg_replace('/^\s*[-*+]\s+/mu', '', $t);         // bullet a inizio riga
+    $t = str_replace(['**', '`'], '', $t);                 // grassetti e code span
+    $t = preg_replace('/\s+/u', ' ', $t);                  // tutto su una riga
+    return trim($t);
+}
+
 /**
  * Estrae il primo oggetto JSON da una risposta LLM (stesso pattern del dispatcher).
  */
@@ -1267,8 +1321,22 @@ function buildDJUserProfiles(array $userIds, int $maxPerUser = DJ_PROFILE_MAX_CH
             continue;
         }
 
-        $name = !empty($row['nickname']) ? $row['nickname'] : $row['user_name'];
-        $profile = trim(preg_replace('/\s+/', ' ', $row['profilo']));
+        // ATTENZIONE: memorie_utenti.nickname NON è un nome breve, è l'analisi
+        // dei soprannomi prodotta da updateUserNickname() — prosa markdown fino a
+        // 500+ caratteri. Usarla come etichetta riempiva il prompt di "**Nome
+        // reale**: ... **Raccomandazione**: ..." per ogni utente, e il modello
+        // rispondeva imitandola con un tema in markdown invece del JSON.
+        // Da quel blocco prendiamo solo la forma di appellativo consigliata.
+        $name = $row['user_name'];
+        if (!empty($row['nickname'])
+            && preg_match('/Rivolgiti a (?:lui|lei|loro) come:?\s*([^\n.:]{1,40})/iu', $row['nickname'], $m)) {
+            $name = trim($m[1], " \t.:*`");
+        }
+
+        $profile = _djCleanProfileText($row['profilo']);
+        if ($profile === '') {
+            continue;
+        }
         if (mb_strlen($profile) > $maxPerUser) {
             $profile = mb_substr($profile, 0, $maxPerUser) . '...';
         }
@@ -1289,11 +1357,11 @@ function _djFindFactualHook(string $context, string $profiles): ?array {
     $profileBlock = $profiles !== '' ? "\n\n### CHI STA PARLANDO ###\n{$profiles}" : '';
 
     $prompt = <<<PROMPT
-Analizza questa conversazione di gruppo e stabilisci se esiste UN'INFORMAZIONE FATTUALE VERIFICABILE che nessuno ha ancora detto e che renderebbe la discussione più ricca.
+Compila un oggetto JSON che dice se in questa conversazione di gruppo manca UN'INFORMAZIONE FATTUALE VERIFICABILE che nessuno ha ancora detto e che renderebbe la discussione più ricca.
 
-Non devi scegliere un messaggio da commentare: guarda il dialogo nel suo insieme e capisci di cosa si sta parlando davvero.
+Non scrivere un'analisi, un riassunto o una descrizione dei partecipanti: l'unico output ammesso è il JSON. Non devi nemmeno scegliere un messaggio da commentare — guarda il dialogo nel suo insieme e capisci di cosa si sta parlando davvero.
 
-Rispondi SOLO con un oggetto JSON, senza altro testo:
+Il JSON, e nient'altro:
 {"argomenti": ["...", "..."], "c_e_materia": true, "search_term": "...", "cosa_aggiungere": "..."}
 
 Campi:
@@ -1311,12 +1379,15 @@ Metti c_e_materia = false anche quando la conversazione è fatta di chiacchiere,
 PROMPT;
 
     // Temperatura sotto il default (1.0): qui serve un'estrazione stabile, non creatività.
+    // Il JSON è chiesto solo dal prompt e dal system: `format` non è utilizzabile
+    // finché QBert non lo inoltra (vedi nota in callOllamaChatViaQBert).
     $result = callOllamaChatViaQBert(
         OLLAMA_MODEL_LIGHT,
         $prompt,
         ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['temperature' => 0.4]),
         false,
-        QBertClient::PRIORITY_LAZY
+        QBertClient::PRIORITY_LAZY,
+        'Rispondi esclusivamente con un oggetto JSON valido, senza testo introduttivo, senza spiegazioni e senza blocchi di codice markdown. Non produrre mai analisi discorsive.'
     );
 
     if (!$result) {
@@ -1385,12 +1456,15 @@ Sii severo: nel dubbio, promosso = false.
 PROMPT;
 
     // Temperatura bassa: il verdetto deve essere stabile, non fantasioso.
+    // Un verdetto illeggibile equivale a uno scarto, quindi il vincolo sul formato
+    // qui pesa: finché `format` non passa da QBert, lo chiediamo via system.
     $result = callOllamaChatViaQBert(
         OLLAMA_MODEL,
         $prompt,
         ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.3]),
         false,
-        QBertClient::PRIORITY_LAZY
+        QBertClient::PRIORITY_LAZY,
+        'Rispondi esclusivamente con un oggetto JSON valido, senza testo introduttivo, senza spiegazioni e senza blocchi di codice markdown.'
     );
 
     if (!$result) {
@@ -1491,8 +1565,15 @@ function _dj($chatID, $hoursAgo = 0, $explain = false) {
 
     // Fallback Hacker News: solo se il dialogo non ha dato materia verificabile
     if ($source === null) {
+        // Il motivo va distinto: un hook illeggibile è un guasto nostro, non una
+        // conversazione senza materia. Confonderli ha già nascosto un bug per due
+        // giri interi, con il log che diceva "nessun fatto verificabile" mentre in
+        // realtà il modello non aveva prodotto JSON.
+        $causa = $hook === null
+            ? ($context['count'] >= 3 ? 'stadio hook fallito (nessun JSON dal modello)' : 'troppo pochi messaggi')
+            : 'nessun fatto verificabile nel dialogo';
         if (!_djCanUseHN()) {
-            return $silenzio('nessun fatto verificabile nel dialogo e fallback HN non disponibile');
+            return $silenzio($causa . ' e fallback HN non disponibile');
         }
 
         $stories = fetchHackerNewsTopStories(30);
