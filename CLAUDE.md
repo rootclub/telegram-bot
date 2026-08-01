@@ -156,7 +156,7 @@ The `image_gen` agent generates images via ComfyUI (z-image turbo workflow):
 The `audio_gen` agent generates songs via ComfyUI (ACE-Step 1.5 XL Turbo):
 1. LLM (`OLLAMA_MODEL` full) receives the ACE-Step compact guide as system prompt and composes the full brief
 2. LLM output format parsed: `##CAPTION:` (style tags), `##LYRICS:` (structured lyrics), `#BPM:`, `#KEYSCALE:`, `#LANGUAGE:` (ISO 2-letter), `#DURATION:` (seconds)
-3. Parser applies clamps: BPM ∈ [60,200], DURATION ∈ [90,240]; fallbacks for missing fields; aborts before ComfyUI if CAPTION or LYRICS missing
+3. Parser applies clamps: BPM ∈ [60,200], DURATION ∈ [10,210]; KEYSCALE is validated against the `{Note}{Accidental?} {major|minor}` whitelist (first valid match wins, fallback `C major`, normalization logged); fallbacks for missing fields; aborts before ComfyUI if CAPTION or LYRICS missing
 4. Workflow `workflows/audio_ace_step1_5_xl_turbo.json` loaded and parameterized (nodes `94` tags/lyrics/bpm/keyscale/language/duration, `98` seconds, `109` seed)
 5. Polls `/history` up to `AUDIO_GEN_POLL_TIMEOUT` (420s), fetches MP3 from `/view?...&subfolder=audio`, sends via `sendAudio` with `title`, `performer="rootbot"`, `duration`
 - Rate limit: 6 songs/hour per user (tracked in `audio_gen_usage` table)

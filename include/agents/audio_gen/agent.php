@@ -9,7 +9,7 @@
 require_once dirname(__DIR__, 2) . '/logger.php';
 
 // Tetto all'attesa su ComfyUI: garantisce che il ciclo di poll termini sempre.
-// Più alto di image_gen perché un brano ACE-Step può arrivare a 240s di durata.
+// Più alto di image_gen perché un brano ACE-Step può arrivare a 210s di durata.
 if (!defined('AUDIO_GEN_POLL_TIMEOUT')) define('AUDIO_GEN_POLL_TIMEOUT', 420);
 
 $audioGenHandler = function (array $ctx, array $params): ?array {
