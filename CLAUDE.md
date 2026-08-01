@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a PHP-based Telegram bot that handles group chat interactions with various features including:
 - AI-powered responses using Ollama API (Gemma 4) with modular intent dispatcher
 - Order management system ("pappatoie" - food ordering)
-- Image handling, vision analysis, image recall via sub-agent, and AI image generation via ComfyUI
+- Image handling, vision analysis, image recall via sub-agent, AI image generation via ComfyUI, and image → 3D model conversion
 - Quiz/trivia system with Wikipedia integration
 - Event management with multi-step workflows
 - TTS (Text-to-Speech) via voice clone
@@ -69,6 +69,7 @@ return [
     'default' => true,              // Fallback agent (only one)
     'enriches' => 'other_agent_id', // Enrichment pattern (runs before target agent)
     'sends_own_response' => true,   // Agent sends its own Telegram messages
+    'help' => "Text block appended to /help output (see help.php)",
     'schema' => function(SQLite3 $db): void {
         // CREATE TABLE IF NOT EXISTS ..., ALTER TABLE guarded by PRAGMA table_info,
         // INSERT OR IGNORE seeds, DELETE cleanup policies. Must be idempotent.
@@ -86,6 +87,9 @@ Helper functions defined at require-time inside `agent.php` (before the `return`
 - **`image_query/`**: Questions about previously shared images — matches reference via LLM light, re-analyzes with `analyzeImage()`. Owns table `image_log` and exposes `saveImageLog()` / `getRecentImages()`
 - **`image_gen/`**: Image generation via ComfyUI — bundled workflow `workflows/z_image_turbo.json`. Rate-limited (6/hour) via owned table `image_gen_usage`
 - **`audio_gen/`**: Music/song generation via ComfyUI (ACE-Step 1.5 XL Turbo) — bundled workflow `workflows/ace_step1_5_xl_turbo.json`. Rate-limited (6/hour) via owned table `audio_gen_usage`
+- **`3D_gen/`** (id `3d_gen` — nota: la directory è maiuscola, l'id no): Image → 3D model (`.glb`). Two backends: standard via ComfyUI/Hunyuan3D v2.1, HD via TRELLIS.2. Rate-limited (6/hour) via owned table `threed_gen_usage`
+- **`profile_self/`**: Tells the user what the bot has memorized about them (reads `memorie_utenti`)
+- **`workload/`**: Answers "sei libero?" / "che stai facendo?" — reports the bot's own current activity
 
 #### Classifier Flow
 
@@ -154,14 +158,44 @@ The `audio_gen` agent generates songs via ComfyUI (ACE-Step 1.5 XL Turbo):
 2. LLM output format parsed: `##CAPTION:` (style tags), `##LYRICS:` (structured lyrics), `#BPM:`, `#KEYSCALE:`, `#LANGUAGE:` (ISO 2-letter), `#DURATION:` (seconds)
 3. Parser applies clamps: BPM ∈ [60,200], DURATION ∈ [90,240]; fallbacks for missing fields; aborts before ComfyUI if CAPTION or LYRICS missing
 4. Workflow `workflows/audio_ace_step1_5_xl_turbo.json` loaded and parameterized (nodes `94` tags/lyrics/bpm/keyscale/language/duration, `98` seconds, `109` seed)
-5. Polls `/history` up to 240s, fetches MP3 from `/view?...&subfolder=audio`, sends via `sendAudio` with `title`, `performer="rootbot"`, `duration`
+5. Polls `/history` up to `AUDIO_GEN_POLL_TIMEOUT` (420s), fetches MP3 from `/view?...&subfolder=audio`, sends via `sendAudio` with `title`, `performer="rootbot"`, `duration`
 - Rate limit: 6 songs/hour per user (tracked in `audio_gen_usage` table)
 - Recent chat context used to resolve references ("stesso stile ma più lento", "fanne uno in italiano")
+
+### 3D Model Generation
+
+The `3d_gen` agent (directory `include/agents/3D_gen/`) turns an **image** into a `.glb` 3D model. It never generates from text: an image is always required.
+
+**Source image resolution** (in order):
+1. **Reply to a photo/image document** — takes the largest `photo` size, or a `document` accepted by `isImageDocument()` (needs `ctx['raw']`)
+2. **Fallback on `image_log`** — the `riferimento` parameter is matched against the last 10 images. `ultima`/`recente`/`prima`/`precedente`/empty short-circuits to `image_log[0]`; anything else goes through `OLLAMA_MODEL_LIGHT`, which picks the index (`0` = no match → the agent gives up and says so)
+
+**Two quality tiers**, chosen by a regex on the raw message text (`$raw['text']` or `$raw['caption']`), *not* by the classifier:
+
+| Tier | Trigger | Backend | Notes |
+|---|---|---|---|
+| standard | default | ComfyUI + Hunyuan3D v2.1 | async: `/upload/image` → `/prompt` → poll `/history` → `/view` |
+| HD | `hq`, `alta qualità`, `qualità superiore/alta/massima`, `high quality`, `massima qualità` | TRELLIS.2 (QBert service `trellis`, `POST /generate`) | synchronous, ~60s, returns the GLB bytes directly |
+
+TRELLIS.2 params: `resolution=1024`, `decimation_target=500000`, `texture_size=2048`, random seed.
+Since the trigger is a plain regex on the user's text, the keyword must appear in the message itself — the classifier does not carry it into `params`.
+
+**Blocking**: both tiers occupy the PHP process for the whole generation — `QBertClient::post()` is `submit()` + `waitForTicket()`, and `waitForTicket()` is a blocking poll loop by design (its docblock: *"ATTENZIONE: blocca, usare solo in script CLI/worker"*). QBert serializes GPU access between apps; it does **not** free the caller. To actually release the process, the flow would have to move to `submit(callbackUrl: ...)` plus a callback endpoint. The `/history` poll loops in `image_gen`, `audio_gen` and `3d_gen` each have their own deadline constant (`*_POLL_TIMEOUT`) because the QBert timeout applies per request, not to the loop.
+
+**ComfyUI workflow** `workflows/3d_hunyuan3d-v2.1.json` (checkpoint `hunyuan_3d_v2.1.safetensors`). Only two nodes are parameterized: `2` (`LoadImage.image` = uploaded filename) and `7` (`KSampler.seed`). Fixed values: latent resolution 4096, 30 steps, cfg 5, euler/normal; `VAEDecodeHunyuan3D` octree 256 / 8000 chunks; `VoxelToMesh` surface-net @ 0.6; output node `10` is `SaveGLB`. The poll scans **all** groups under `outputs['10']` for the first `*.glb` filename, because SaveGLB exposes it under varying keys (`3d`, `result`, `gltf`).
+
+**Delivery**: the GLB is saved to `models/{32-hex-uuid}.glb` at project root, sent as a Telegram document (`model/gltf-binary`, `model.glb`) with an inline **"Anteprima 3D"** button pointing at `viewer.php?id={uuid}`. The viewer validates the id against `/^[a-f0-9]{32}$/` and renders the model with `<model-viewer>` 3.5.0 (auto-rotate, camera controls, AR via webxr/scene-viewer/quick-look). The unguessable id is what protects the file — there is no other auth.
+
+- Rate limit: 6 models/hour per user (`threed_gen_usage`)
+- `models/` is created on demand; lazy cleanup deletes `.glb` files older than 30 days on every run
+- Status message ("Sto generando il modello 3D...") is deleted at the end; `upload_document` chat action is refreshed every 3s while polling
+- On success writes `[modello 3D generato]` to `contesto_chat`
+- Logs to `logs/3d_gen.log`
 
 ### Cron Jobs
 
 - **`cron_saluto.php`** — Daily evening recap at 23:50, calls `_saluto()` and sends to main group with TTS button
-- **`cron_dj.php`** — Hourly spontaneous DJ commentary, Hacker News integration, configurable probability (15%), min 2h between posts, min 3 messages to trigger
+- **`cron_dj.php`** — Hourly spontaneous DJ commentary, Hacker News integration, configurable probability (40%), min 2h between posts, min 3 messages in the last 6h to trigger. The dice only decide whether to *attempt*: whether anything is actually posted depends on the quality gates inside `_dj()` (verifiable Wikipedia fact, HN fallback with its own cap, final LLM judge)
 - **`cron_rassegna.php`** — Morning press digest at 08:00, fetches from rootclub.it/news/. Considers articles from the last 48h (buffer against skipped runs); dedup via `rassegna_posted` table (URL as PK) ensures no duplicates across days
 
 ## Database Schema
@@ -220,7 +254,7 @@ The `audio_gen` agent generates songs via ComfyUI (ACE-Step 1.5 XL Turbo):
     - `id`, `group_id`, `telegram_msg_id`, `user_id`, `user_name`, `message_text`, `timestamp`
     - UNIQUE on `(group_id, telegram_msg_id)` for idempotent import
 
-22. **image_gen_usage**, **audio_gen_usage** — rate-limit tables owned by the `image_gen` and `audio_gen` agents respectively (schema in each agent's `agent.php`). Auto-cleanup: 1 hour.
+22. **image_gen_usage**, **audio_gen_usage**, **threed_gen_usage** — rate-limit tables owned by the `image_gen`, `audio_gen` and `3d_gen` agents respectively (schema in each agent's `agent.php`). Auto-cleanup: 1 hour.
 
 23. **rassegna_posted** - Articles already posted by morning press digest (dedup)
     - `url` (PK), `title`, `posted_at`
@@ -262,7 +296,7 @@ Since this is a webhook-based bot, you'll need:
 6. Check `dispatcher.log` on the server for classification results
 
 ### Removing a Sub-Agent
-Delete the agent's directory. The classifier no longer offers that intent; the owned tables remain in the DB (harmless) and can be dropped manually if desired. **Note:** slash commands and help entries are still hardcoded in `message.php`/`help.php` (see TODO in memory: `project_agent_improvements.md`) — remove those references manually.
+Delete the agent's directory. The classifier no longer offers that intent; the owned tables remain in the DB (harmless) and can be dropped manually if desired. Help text follows automatically for agents that declare a `help` field (`_help()` aggregates it from the registry). **Note:** any hardcoded slash-command aliases in `message.php` must still be removed manually.
 
 ### Log Files
 
@@ -277,6 +311,7 @@ Canali attivi:
 - `logs/saluto.log` — Evening recap diagnostics
 - `logs/image_gen.log` — Image generation agent debug
 - `logs/audio_gen.log` — Music/audio generation agent debug
+- `logs/3d_gen.log` — 3D model generation agent debug (source resolution, ComfyUI/TRELLIS.2 calls, viewer URL)
 - `logs/image_debug.log` — Image download/processing debug
 - `logs/memory.log` — User memory extraction diagnostics
 - `logs/memory_cron.log` — Nightly user-memory cron job
@@ -288,6 +323,7 @@ Canali attivi:
 - `extract_user_memory.php` — CLI tool for user profile extraction
 - `import_telegram_export.php` — Import Telegram Desktop JSON exports into `storico_messaggi`
 - `clear_opcache.php` — Reset OPcache on server
+- `viewer.php` — Public interactive viewer for the `.glb` files produced by `3d_gen`; reads `models/{id}.glb`, no auth beyond the unguessable id
 
 ### Configuration Constants
 Key settings in `config.php`:
