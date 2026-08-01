@@ -48,9 +48,21 @@ $audioGenHandler = function (array $ctx, array $params): ?array {
                 $duration = max(10, min(210, (int)$m[0]));
             }
 
-            if (!$key) {
-                $key = 'C major';
+            // Whitelist keyscale: ACE-Step accetta solo "{Note}{Accidental?} {Mode}".
+            // Note A-G, accidental opzionale (# o b), modo major|minor. Niente intervalli, "to", "/", elenchi.
+            // Se la LLM sgarra (es. "A minor to C major", "key of C", "Cmaj7"), prendiamo solo il primo
+            // match valido nella stringa; se non c'è nemmeno quello, fallback a "C major".
+            $keyRaw = $key;
+            $normalizedKey = null;
+            if ($key !== null && $key !== '') {
+                if (preg_match('/\b([A-G])\s*([#b])?\s+(major|minor)\b/i', $key, $m)) {
+                    $note = strtoupper($m[1]);
+                    $acc  = strtolower($m[2] ?? '');
+                    $mode = strtolower($m[3]);
+                    $normalizedKey = $note . $acc . ' ' . $mode;
+                }
             }
+            $key = $normalizedKey ?? 'C major';
 
             if ($lang && preg_match('/[a-z]{2}/i', $lang, $m)) {
                 $lang = strtolower($m[0]);
@@ -59,12 +71,13 @@ $audioGenHandler = function (array $ctx, array $params): ?array {
             }
 
             return [
-                'caption'  => $caption ?? '',
-                'lyrics'   => $lyrics ?? '',
-                'bpm'      => $bpm,
-                'keyscale' => $key,
-                'language' => $lang,
-                'duration' => $duration,
+                'caption'      => $caption ?? '',
+                'lyrics'       => $lyrics ?? '',
+                'bpm'          => $bpm,
+                'keyscale'     => $key,
+                'keyscale_raw' => $keyRaw,
+                'language'     => $lang,
+                'duration'     => $duration,
             ];
         };
 
@@ -232,7 +245,11 @@ Seguendo questa guida componi un brano musicale, senza preamboli e conclusioni, 
 <intero tra 60 e 200>
 
 #KEYSCALE:
-<es. C major, A minor, F# minor, ecc.>
+<UNA SOLA tonalità nel formato "{Nota}{Accidental?} {modo}". Nota: A, B, C, D, E, F, G. Accidental opzionale: # o b. Modo: major oppure minor.
+Valori ammessi (gli unici 34 validi):
+C major, C# major, Db major, D major, D# major, Eb major, E major, F major, F# major, Gb major, G major, G# major, Ab major, A major, A# major, Bb major, B major,
+C minor, C# minor, Db minor, D minor, D# minor, Eb minor, E minor, F minor, F# minor, Gb minor, G minor, G# minor, Ab minor, A minor, A# minor, Bb minor, B minor.
+VIETATO: intervalli ("A minor to C major"), elenchi ("C major / G major"), modulazioni, modi diversi da major/minor (no dorian/phrygian/lydian/ecc.), notazioni di accordi ("Cmaj7", "Am7"), commenti tra parentesi. Scegli UNA tonalità sola, esattamente come scritta nella lista qui sopra.>
 
 #LANGUAGE:
 <codice ISO a 2 lettere: it, en, es, fr, de, ja, ... — deve coincidere con la lingua del testo>
@@ -261,6 +278,10 @@ SYS;
              ', key=' . ($parsed['keyscale'] ?? 'NULL') .
              ', lang=' . ($parsed['language'] ?? 'NULL') .
              ', duration=' . ($parsed['duration'] ?? 'NULL'));
+
+        if (!empty($parsed['keyscale_raw']) && trim($parsed['keyscale_raw']) !== $parsed['keyscale']) {
+            $log("Keyscale normalizzata: raw=" . trim($parsed['keyscale_raw']) . " -> " . $parsed['keyscale']);
+        }
 
         if (empty($parsed['caption']) || empty($parsed['lyrics'])) {
             $cleanup();
