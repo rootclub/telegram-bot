@@ -57,6 +57,44 @@ function getQBertClient() {
 }
 
 /**
+ * Contabilità dei token di una chiamata LLM, da scrivere nel log del chiamante.
+ *
+ * Serve a rendere visibile la troncatura del prompt, che altrimenti è muta: Ollama
+ * taglia a num_ctx senza errori, senza warning e con done_reason=stop, quindi un
+ * giro troncato è indistinguibile da uno riuscito finché non si guarda l'output.
+ * Il DJ ci ha perso due ipotesi sbagliate prima che questa riga chiarisse tutto.
+ *
+ * @param string $logFile   File di log (usare logPath('canale'))
+ * @param string $label     Etichetta del punto di chiamata
+ * @param string $prompt    Prompt inviato (solo per misurarne la lunghezza)
+ * @param array|null $result Ritorno di callOllamaChatViaQBert()
+ */
+function logPromptBudget(string $logFile, string $label, string $prompt, ?array $result): void {
+    $chars = mb_strlen($prompt);
+    // ~3.9 caratteri per token sull'italiano, misurato confrontando prompt_eval_count
+    // con la lunghezza reale dei prompt del DJ. È una stima, il dato vero è 'letti'.
+    $stima  = (int)($chars / 3.9);
+    $letti  = $result['prompt_eval_count'] ?? null;
+
+    $riga = sprintf(
+        "[%s] prompt %d char (~%d token stimati), letti %s, generati %s, done_reason=%s",
+        $label, $chars, $stima,
+        $letti ?? '?',
+        $result['eval_count'] ?? '?',
+        $result['done_reason'] ?? '?'
+    );
+
+    // Se il modello ha letto molto meno di quanto stimiamo di avergli mandato, il
+    // prompt è stato tagliato: quasi sempre num_ctx troppo basso per questo punto.
+    if ($letti !== null && $stima > 0 && $letti < $stima * 0.85) {
+        $riga .= sprintf('  <-- SOSPETTA TRONCATURA (letti %d%% dello stimato): alzare num_ctx',
+            (int)round($letti * 100 / $stima));
+    }
+
+    file_put_contents($logFile, $riga . "\n", FILE_APPEND);
+}
+
+/**
  * Chiama Ollama via QBert (chiamata bloccante semplice)
  * Per chiamate non-streaming dove non serve feedback progressivo
  *
@@ -932,6 +970,10 @@ PROMPT;
         return "Si è verificato un errore durante la comunicazione con l'AI.";
     }
 
+    // Il prompt qui cresce con il contesto conversazione, i profili utente e la
+    // sezione Wikipedia: quanto arrivi davvero al modello va misurato, non supposto.
+    logPromptBudget(logPath('ai'), 'ai_core', $prompt, $result);
+
     $response = $result['response'] ?? '';
 
     // Rimuovi tag di thinking
@@ -991,6 +1033,9 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout
     $response = trim($response);
 
     file_put_contents($logFile, "[$label] QBert OK, time: {$elapsed}s, response length: " . strlen($response) . "\n", FILE_APPEND);
+    // _saluto lavora su un'intera giornata di messaggi: è il candidato più probabile
+    // a sbattere contro num_ctx. Qui non alziamo niente a occhio — prima misuriamo.
+    logPromptBudget($logFile, $label, $prompt, $result);
 
     return $response;
 }
@@ -1402,18 +1447,7 @@ PROMPT;
         return null;
     }
 
-    // Misure, non ipotesi: in locale lo stesso stadio con un prompt sintetico di
-    // pari volume risponde sempre in JSON, in produzione mai. prompt_eval_count
-    // dice quanti token il modello ha davvero letto — se è molto sotto ai token
-    // inviati, il prompt è stato troncato e l'istruzione iniziale è caduta.
-    file_put_contents($djLog, sprintf(
-        "HOOK: prompt %d char (~%d token stimati), letti %s token, generati %s, done_reason=%s\n",
-        mb_strlen($prompt),
-        (int)(mb_strlen($prompt) / 3.2),
-        $result['prompt_eval_count'] ?? '?',
-        $result['eval_count'] ?? '?',
-        $result['done_reason'] ?? '?'
-    ), FILE_APPEND);
+    logPromptBudget($djLog, 'HOOK', $prompt, $result);
 
     $raw = trim(stripThinkingTags($result['response'] ?? ''));
     $parsed = _djParseJson($raw);
