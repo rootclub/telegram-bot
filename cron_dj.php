@@ -28,7 +28,8 @@ define('MAIN_GROUP_ID', -1001402757977);
 // Il dado decide solo se TENTARE. Se il tentativo produca o meno un messaggio lo
 // stabiliscono i gate qualitativi dentro _dj() (fatto verificabile su Wikipedia,
 // fallback HN col suo tetto, giudizio finale): per questo la probabilità è alta.
-define('POST_PROBABILITY', 40);        // Probabilità % di tentare (0-100)
+// Il freno vero resta MIN_HOURS_BETWEEN_POSTS, non il dado.
+define('POST_PROBABILITY', 80);        // Probabilità % di tentare (0-100)
 define('MIN_HOURS_BETWEEN_POSTS', 2);  // Minimo ore tra un post e l'altro
 define('MIN_MESSAGES_TO_POST', 3);     // Minimo messaggi recenti per tentare
 define('CONTEXT_WINDOW_HOURS', 6);     // Finestra su cui misurare l'attività del gruppo
