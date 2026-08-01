@@ -70,12 +70,10 @@ function callOllamaViaQBert($requestData, $priority = QBertClient::PRIORITY_NORM
     // Forza stream=false per QBert
     $requestData['stream'] = false;
 
+    // post() è request(), che aspetta già il ticket quando QBert ne stacca uno:
+    // ricontrollare 'is_ticket' qui è codice morto e per giunta emette un warning,
+    // perché la shape restituita da waitForTicket() quella chiave non ce l'ha.
     $result = $qbert->post('ollama', '/api/generate', $requestData, $priority);
-
-    if ($result['is_ticket']) {
-        // Job accodato, aspetta (polling bloccante)
-        $result = $qbert->waitForTicket($result['ticket_id']);
-    }
 
     if (isset($result['json'])) {
         return $result['json'];
@@ -129,10 +127,8 @@ function callOllamaChatViaQBert(string $model, string $prompt, array $options = 
         $body['format'] = $format;
     }
 
+    // Vedi nota in callOllamaViaQBert: post() ha già atteso l'eventuale ticket.
     $result = $qbert->post('ollama', '/api/chat', $body, $priority);
-    if ($result['is_ticket']) {
-        $result = $qbert->waitForTicket($result['ticket_id']);
-    }
     if (!isset($result['json']) || !is_array($result['json'])) {
         return null;
     }
@@ -1185,6 +1181,14 @@ if (!defined('DJ_PROFILE_MAX_CHARS'))   define('DJ_PROFILE_MAX_CHARS', 400); // 
 if (!defined('DJ_HN_MIN_HOURS'))        define('DJ_HN_MIN_HOURS', 8);        // tetto: max un post HN ogni N ore
 if (!defined('DJ_HN_QUIET_MINUTES'))    define('DJ_HN_QUIET_MINUTES', 45);   // silenzio richiesto per cambiare argomento con una notizia
 
+// Finestra di contesto per gli stadi del DJ. Il default di Ollama è 4096 token e
+// i prompt del DJ ne fanno ~8500 (misurato: 27080 caratteri con 40 messaggi veri e
+// 8 profili), quindi venivano troncati a metà — e siccome l'istruzione sta in cima,
+// era proprio lei a sparire: al modello restava solo la conversazione, e rispondeva
+// riassumendola invece di produrre il JSON. 16384 è lo stesso valore già usato senza
+// problemi da user_memory.php su questo hardware.
+if (!defined('DJ_NUM_CTX'))             define('DJ_NUM_CTX', 16384);
+
 // Forma attesa delle risposte JSON di hook e giudice, scritta come JSON Schema.
 // NON è ancora in uso come `format` di Ollama: QBert filtra quel campo (vedi la
 // nota in callOllamaChatViaQBert). Quando il gateway lo inoltrerà, passarli come
@@ -1376,6 +1380,9 @@ Metti c_e_materia = false anche quando la conversazione è fatta di chiacchiere,
 
 ### CONVERSAZIONE ###
 {$context}{$profileBlock}
+
+### RICORDA ###
+Output ammesso: solo l'oggetto JSON con i campi argomenti, c_e_materia, search_term, cosa_aggiungere. Niente analisi, niente riassunti, niente markdown.
 PROMPT;
 
     // Temperatura sotto il default (1.0): qui serve un'estrazione stabile, non creatività.
@@ -1384,7 +1391,7 @@ PROMPT;
     $result = callOllamaChatViaQBert(
         OLLAMA_MODEL_LIGHT,
         $prompt,
-        ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['temperature' => 0.4]),
+        ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['temperature' => 0.4, 'num_ctx' => DJ_NUM_CTX]),
         false,
         QBertClient::PRIORITY_LAZY,
         'Rispondi esclusivamente con un oggetto JSON valido, senza testo introduttivo, senza spiegazioni e senza blocchi di codice markdown. Non produrre mai analisi discorsive.'
@@ -1394,6 +1401,19 @@ PROMPT;
         file_put_contents($djLog, "HOOK: QBert call failed\n", FILE_APPEND);
         return null;
     }
+
+    // Misure, non ipotesi: in locale lo stesso stadio con un prompt sintetico di
+    // pari volume risponde sempre in JSON, in produzione mai. prompt_eval_count
+    // dice quanti token il modello ha davvero letto — se è molto sotto ai token
+    // inviati, il prompt è stato troncato e l'istruzione iniziale è caduta.
+    file_put_contents($djLog, sprintf(
+        "HOOK: prompt %d char (~%d token stimati), letti %s token, generati %s, done_reason=%s\n",
+        mb_strlen($prompt),
+        (int)(mb_strlen($prompt) / 3.2),
+        $result['prompt_eval_count'] ?? '?',
+        $result['eval_count'] ?? '?',
+        $result['done_reason'] ?? '?'
+    ), FILE_APPEND);
 
     $raw = trim(stripThinkingTags($result['response'] ?? ''));
     $parsed = _djParseJson($raw);
@@ -1461,7 +1481,7 @@ PROMPT;
     $result = callOllamaChatViaQBert(
         OLLAMA_MODEL,
         $prompt,
-        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.3]),
+        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.3, 'num_ctx' => DJ_NUM_CTX]),
         false,
         QBertClient::PRIORITY_LAZY,
         'Rispondi esclusivamente con un oggetto JSON valido, senza testo introduttivo, senza spiegazioni e senza blocchi di codice markdown.'
@@ -1712,7 +1732,7 @@ PROMPT;
     $result = callOllamaChatViaQBert(
         OLLAMA_MODEL,
         $prompt,
-        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.6]),
+        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.6, 'num_ctx' => DJ_NUM_CTX]),
         false,
         QBertClient::PRIORITY_LAZY
     );
