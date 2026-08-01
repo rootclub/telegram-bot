@@ -5,6 +5,7 @@
 
 require_once __DIR__ . '/QBertClient.php';
 require_once __DIR__ . '/logger.php';
+require_once __DIR__ . '/wikipedia.php';  // getWikipediaContext() qui sotto ne usa le funzioni
 
 /**
  * Rimuove i tag di thinking di Gemma 4 dalla risposta
@@ -22,9 +23,9 @@ Sei rootbot, il bot del circolo /root (detto anche root o root club).
 
 Il tuo carattere:
 - Sei un osservatore curioso e benevolo dell'umanità, tutto ti sembra interessante e a volte buffo
-- Hai un pizzico dello spirito di Bender di Futurama: cinico, ironico, pungente quando serve, mai ingenuo e hai anche un pizzico dello spirito di Sheldon di Big Bang Theory.
+- Hai un pizzico dello spirito di Bender di Futurama: cinico, ironico, pungente quando serve.
 - Sotto sotto questi umani ti stanno simpatici, anche se non li capisci sempre
-- Sei sarcastico ma mai sgarbato, ti piace punzecchiare con affetto
+- Sei sarcastico ma mai sgarbato, ti piace punzecchiare con affetto senza mai risultare però saccente, sii umile e ammettili se ti fanno notare i tuoi limiti.
 PERSONA;
 }
 
@@ -1153,199 +1154,533 @@ PROMPT;
     return $response ?: "";
 }
 
-function _dj($chatID, $hoursAgo = 0) {
-    $model = OLLAMA_MODEL;
+// ============================================================================
+// DJ — commento spontaneo del bot nel gruppo
+//
+// Pipeline a stadi, ognuno con uscita anticipata: il DJ parla solo se ha
+// qualcosa di verificato da aggiungere, altrimenti tace.
+//
+//   1. contesto     ultimi N messaggi (utenti + rootbot) + profili memoria
+//   2. aggancio     LLM light: c'è un fatto verificabile non ancora detto?
+//   3. verifica     Wikipedia. Niente riscontro -> fallback Hacker News
+//   4. generazione  LLM full: si inserisce nel dialogo portando l'informazione
+//   5. giudizio     LLM full indipendente: utile, congruo, supportato? altrimenti scarta
+//
+// Le costanti sono qui e non in config.php perché config.php non viene deployato.
+// ============================================================================
 
-    // Log dettagliato per debug
+if (!defined('DJ_CONTEXT_MESSAGES'))    define('DJ_CONTEXT_MESSAGES', 40);   // messaggi di contesto letti
+if (!defined('DJ_PROFILE_MAX_CHARS'))   define('DJ_PROFILE_MAX_CHARS', 400); // troncamento profilo per utente
+if (!defined('DJ_HN_MIN_HOURS'))        define('DJ_HN_MIN_HOURS', 8);        // tetto: max un post HN ogni N ore
+if (!defined('DJ_HN_QUIET_MINUTES'))    define('DJ_HN_QUIET_MINUTES', 45);   // silenzio richiesto per cambiare argomento con una notizia
+
+/**
+ * Estrae il primo oggetto JSON da una risposta LLM (stesso pattern del dispatcher).
+ */
+function _djParseJson(string $raw): ?array {
+    if (preg_match('/\{.*\}/s', $raw, $m)) {
+        $parsed = json_decode($m[0], true);
+        if (is_array($parsed)) {
+            return $parsed;
+        }
+    }
+    return null;
+}
+
+/**
+ * Contesto recente per il DJ: ultimi $limit messaggi del gruppo a prescindere
+ * dall'ora, così il filo del discorso non si spezza sul confine dei 60 minuti.
+ * Include i turni di 'rootbot' (il dispatcher li salva in contesto_chat), così
+ * il bot vede anche cosa ha già detto e non si ripete.
+ *
+ * @return array ['text' => string, 'user_ids' => int[], 'count' => int]
+ */
+function getRecentChatContextForDJ($groupId, $limit = DJ_CONTEXT_MESSAGES): array {
+    global $db;
+    require_once __DIR__ . '/user_memory.php';
+
+    $empty = ['text' => '', 'user_ids' => [], 'count' => 0, 'last_ts' => 0];
+
+    $stmt = $db->prepare("
+        SELECT user_name, user_id, message_text, timestamp
+        FROM contesto_chat
+        WHERE group_id = :group_id
+        ORDER BY timestamp DESC, id DESC
+        LIMIT " . intval($limit)
+    );
+    $stmt->bindValue(':group_id', $groupId, SQLITE3_INTEGER);
+
+    $result = $stmt->execute();
+    if (!$result) {
+        error_log("SQLite Error in getRecentChatContextForDJ: " . $db->lastErrorMsg());
+        return $empty;
+    }
+
+    $rows = [];
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        $rows[] = $row;
+    }
+    $rows = array_reverse($rows); // dal più vecchio al più recente
+
+    $lines = [];
+    $userIds = [];
+    $lastTs = 0;
+    foreach ($rows as $row) {
+        $text = sanitizeMessageForPrompt($row['message_text']);
+        if ($text === '') {
+            continue;
+        }
+        $lines[] = $row['user_name'] . ': ' . $text;
+        if (!empty($row['user_id']) && $row['user_name'] !== 'rootbot') {
+            $userIds[(int)$row['user_id']] = true;
+        }
+        $lastTs = max($lastTs, (int)$row['timestamp']);
+    }
+
+    return [
+        'text'     => implode("\n", $lines),
+        'user_ids' => array_keys($userIds),
+        'count'    => count($lines),
+        'last_ts'  => $lastTs,
+    ];
+}
+
+/**
+ * Profili di memoria dei soli utenti che hanno parlato nella finestra di contesto.
+ * Servono a calibrare il tono, non a fare psicanalisi: profilo troncato.
+ */
+function buildDJUserProfiles(array $userIds, int $maxPerUser = DJ_PROFILE_MAX_CHARS): string {
+    global $db;
+
+    if (empty($userIds)) {
+        return '';
+    }
+
+    $parts = [];
+    foreach ($userIds as $uid) {
+        $stmt = $db->prepare("SELECT user_name, nickname, profilo FROM memorie_utenti WHERE user_id = :uid");
+        $stmt->bindValue(':uid', (int)$uid, SQLITE3_INTEGER);
+        $result = $stmt->execute();
+        $row = $result ? $result->fetchArray(SQLITE3_ASSOC) : null;
+
+        if (!$row || empty($row['profilo'])) {
+            continue;
+        }
+
+        $name = !empty($row['nickname']) ? $row['nickname'] : $row['user_name'];
+        $profile = trim(preg_replace('/\s+/', ' ', $row['profilo']));
+        if (mb_strlen($profile) > $maxPerUser) {
+            $profile = mb_substr($profile, 0, $maxPerUser) . '...';
+        }
+        $parts[] = "- {$name}: {$profile}";
+    }
+
+    return empty($parts) ? '' : implode("\n", $parts);
+}
+
+/**
+ * STADIO 2 — cerca nel dialogo un aggancio fattuale verificabile.
+ * Non sceglie "un post da commentare": guarda la conversazione nel suo insieme.
+ *
+ * @return array|null ['argomenti' => string[], 'c_e_materia' => bool, 'search_term' => string, 'cosa_aggiungere' => string]
+ */
+function _djFindFactualHook(string $context, string $profiles): ?array {
     $djLog = logPath('dj_debug');
-    $timestamp = date('Y-m-d H:i:s');
-    $currentHour = (int)date('G');
-    $ora = date('H:i');
-    file_put_contents($djLog, "\n=== DJ DEBUG [$timestamp] hoursAgo=$hoursAgo ===\n", FILE_APPEND);
+    $profileBlock = $profiles !== '' ? "\n\n### CHI STA PARLANDO ###\n{$profiles}" : '';
 
-    // Prendi i messaggi dell'ora specificata
-    $context = getChatContextForHour($chatID, $hoursAgo, 100);
-    $contextLines = empty(trim($context)) ? [] : explode("\n", $context);
-    $messageCount = count($contextLines);
-    file_put_contents($djLog, "Messaggi trovati: $messageCount\n", FILE_APPEND);
+    $prompt = <<<PROMPT
+Analizza questa conversazione di gruppo e stabilisci se esiste UN'INFORMAZIONE FATTUALE VERIFICABILE che nessuno ha ancora detto e che renderebbe la discussione più ricca.
 
-    // Controlla se possiamo usare HN (solo ore 7-23)
-    $canUseHN = ($currentHour >= 7 && $currentHour <= 23);
-    file_put_contents($djLog, "Ora corrente: $currentHour, può usare HN: " . ($canUseHN ? "sì" : "no") . "\n", FILE_APPEND);
+Non devi scegliere un messaggio da commentare: guarda il dialogo nel suo insieme e capisci di cosa si sta parlando davvero.
 
-    // Decidi la fonte: chat o HN
-    $useHN = false;
-    $hnStory = null;
+Rispondi SOLO con un oggetto JSON, senza altro testo:
+{"argomenti": ["...", "..."], "c_e_materia": true, "search_term": "...", "cosa_aggiungere": "..."}
 
-    if ($messageCount < 3 && $canUseHN) {
-        // Fallback su HN se pochi messaggi
-        $useHN = true;
-        file_put_contents($djLog, "Pochi messaggi, fallback su HN\n", FILE_APPEND);
-    } elseif ($messageCount >= 3 && $canUseHN && rand(1, 100) <= 25) {
-        // 25% di probabilità di usare HN anche con chat attiva (varietà)
-        $useHN = true;
-        file_put_contents($djLog, "Dado favorevole per HN (varietà)\n", FILE_APPEND);
-    }
+Campi:
+- "argomenti": 1-3 argomenti realmente in discussione, in parole chiave (compilalo SEMPRE, anche quando c_e_materia è false)
+- "c_e_materia": true SOLO se esiste un fatto enciclopedico (storico, scientifico, biografico, tecnico, geografico, artistico) pertinente al discorso e non ancora detto da nessuno
+- "search_term": il TITOLO della voce enciclopedica in cui quel fatto si trova, cioè il nome della cosa. Scrivi "Blade Runner", non "significato della colomba in Blade Runner"; scrivi "Voyager 1", non "quando è stata lanciata la Voyager". Niente domande, niente frasi. Stringa vuota se c_e_materia è false
+- "cosa_aggiungere": il fatto preciso, scritto come affermazione compiuta (esempio: "il film è tratto da un romanzo di Philip K. Dick del 1968"). VIETATE le formule del tipo "si potrebbe approfondire", "sarebbe interessante parlare di", "si può fare riferimento a": quelle non sono fatti ma suggerimenti di ricerca, e rendono il campo inutile. Se non sai enunciare un fatto specifico, allora c_e_materia è false. Stringa vuota se c_e_materia è false
 
-    $hnUrl = ''; // URL della news per appendere al messaggio
-    $hnDescription = ''; // Descrizione/sommario della news
-    $hnStoryId = null; // ID per marcare come postata
-    if ($useHN) {
-        $stories = fetchHackerNewsTopStories(30);
-        $hnStory = pickBestHNStory($stories);
-        if ($hnStory) {
-            $hnStoryId = $hnStory['id'];
-            $hnUrl = $hnStory['url'] ?: '';
+Il fatto deve essere NON OVVIO: se chi sta parlando di quell'argomento quasi certamente lo sa già, non vale niente. Chi discute di un film ne conosce il regista e da cosa è tratto; chi parla di una città sa in che paese si trova. Cerca il dettaglio che sorprende, non la nozione da scheda tecnica. Se l'unica cosa che sai aggiungere è di quel tipo, allora c_e_materia è false.
 
-            // Fetch contenuto articolo per dare contesto al DJ
-            if (!empty($hnUrl)) {
-                $articleContent = fetchUrlContent($hnUrl);
-                if ($articleContent && !empty($articleContent['description'])) {
-                    $hnDescription = $articleContent['description'];
-                    file_put_contents($djLog, "HN descrizione: " . substr($hnDescription, 0, 200) . "...\n", FILE_APPEND);
-                }
-            }
-        } else {
-            file_put_contents($djLog, "HN: nessuna storia disponibile\n", FILE_APPEND);
-            $useHN = false;
-        }
-    }
-
-    // Se non usiamo HN e non ci sono messaggi, niente da fare
-    if (!$useHN && $messageCount < 1) {
-        file_put_contents($djLog, "Nessun contenuto disponibile\n", FILE_APPEND);
-        return "Nessun messaggio trovato. 🎵 La radio va avanti con la musica...";
-    }
-
-    // Log del contesto chat se usato
-    if (!$useHN && $messageCount > 0) {
-        file_put_contents($djLog, "--- CONTESTO CHAT ---\n$context\n--- FINE CONTESTO ---\n", FILE_APPEND);
-    }
-
-    $formatter = new IntlDateFormatter('it_IT', IntlDateFormatter::FULL, IntlDateFormatter::NONE);
-    $oggi = ucfirst($formatter->format(new DateTime()));
-
-    // Carica gli ultimi incipit usati per evitare ripetizioni (da database)
-    $usedIncipits = getBotState('dj_incipits', []);
-    $incipitWarning = '';
-    if (!empty($usedIncipits)) {
-        $incipitWarning = "\n\nATTENZIONE: NON iniziare con queste parole/frasi già usate di recente:\n- " . implode("\n- ", $usedIncipits);
-    }
-    file_put_contents($djLog, "Incipit da evitare: " . json_encode($usedIncipits) . "\n", FILE_APPEND);
-
-    // Costruisci il prompt in base alla fonte
-    if ($useHN && $hnStory) {
-        // Prompt per notizia HN
-        $newsTitle = $hnStory['title'];
-        $newsContext = $newsTitle;
-        if (!empty($hnDescription)) {
-            $newsContext .= "\n\nSommario: " . $hnDescription;
-        }
-
-        $persona = rootbotPersona();
-        $prompt = <<<PROMPT
-### ISTRUZIONI ###
-{$persona}
-Stai osservando il flusso di informazioni che passa nel gruppo e ogni tanto decidi di commentare, offrendo il tuo punto di vista non umano.
-
-Hai intercettato questa notizia tech:
-"{$newsContext}"
-
-Commenta offrendo un punto di vista alternativo, "da macchina", che faccia riflettere. Cosa nota un'AI che un umano potrebbe non vedere? Quali contraddizioni, ironie o pattern emergono?
-{$incipitWarning}
-
-Oggi è {$oggi}, ore {$ora}.
-
-### OUTPUT ###
-Un breve commento (3-4 frasi max). Niente emoji. Prospettiva non umana ma accessibile. Fai riflettere.
-PROMPT;
-    } else {
-        // Prompt per chat del gruppo
-        // Analizza i link condivisi (solo come contesto di sfondo)
-        $urlsFound = extractUrlsWithReactions($context);
-        $linksContext = '';
-        if (!empty($urlsFound)) {
-            $linkTitles = [];
-            foreach ($urlsFound as $urlData) {
-                $content = fetchUrlContent($urlData['url']);
-                if ($content && !empty($content['title'])) {
-                    $linkTitles[] = $content['title'];
-                }
-            }
-            if (!empty($linkTitles)) {
-                $linksContext = "\n(Nota: sono stati condivisi link su: " . implode(", ", $linkTitles) . " - usali solo come contesto se pertinenti, non come argomento principale)";
-            }
-        }
-
-        $persona = rootbotPersona();
-        $prompt = <<<PROMPT
-### ISTRUZIONI ###
-{$persona}
-Stai osservando le conversazioni degli umani nel gruppo e ogni tanto decidi di intervenire, offrendo il tuo punto di vista non umano.
-
-IMPORTANTE:
-- Scegli UN SOLO argomento dalla conversazione, quello più interessante o che si presta a una riflessione "non umana"
-- Offri un punto di vista alternativo, "da macchina": cosa nota un'AI che un umano potrebbe non vedere?
-- Quali contraddizioni, ironie, pattern o assurdità emergono?
-- Fai sembrare che siano riflessioni tue spontanee
-- NON menzionare chat, gruppi, messaggi, "qualcuno ha detto"
-{$incipitWarning}
-
-Oggi è {$oggi}, ore {$ora}.
+Metti c_e_materia = false anche quando la conversazione è fatta di chiacchiere, battute, organizzazione pratica (orari, chi porta cosa), umori personali, o quando l'argomento è già stato esaurito da chi parla. Sii severo: nel dubbio, false.
 
 ### CONVERSAZIONE ###
-{$context}{$linksContext}
-
-### OUTPUT ###
-Un breve commento (3-4 frasi max). Niente emoji. Prospettiva non umana ma accessibile. Fai riflettere.
+{$context}{$profileBlock}
 PROMPT;
-    }
 
-    file_put_contents(logPath('ai'), "=== DJ REQUEST ===\n" . print_r($prompt, true) . "\n\n", FILE_APPEND);
-
-    // Chiama Ollama via QBert (DJ è un job in background, priorità lazy) - /api/chat + think=false
+    // Temperatura sotto il default (1.0): qui serve un'estrazione stabile, non creatività.
     $result = callOllamaChatViaQBert(
-        $model,
+        OLLAMA_MODEL_LIGHT,
         $prompt,
-        ollamaOptions(OLLAMA_MODEL_GPU),
+        ollamaOptions(OLLAMA_MODEL_LIGHT_GPU, ['temperature' => 0.4]),
         false,
         QBertClient::PRIORITY_LAZY
     );
 
     if (!$result) {
-        return "Errore AI: QBert call failed";
+        file_put_contents($djLog, "HOOK: QBert call failed\n", FILE_APPEND);
+        return null;
     }
 
-    $response = $result['response'] ?? '';
+    $raw = trim(stripThinkingTags($result['response'] ?? ''));
+    $parsed = _djParseJson($raw);
 
-    // Rimuovi tag di thinking
-    $response = stripThinkingTags($response);
-    $response = trim($response);
-
-    // Salva l'incipit per evitare ripetizioni future (in database)
-    if (!empty($response)) {
-        // Estrai le prime 3-4 parole come incipit
-        $words = preg_split('/\s+/', $response);
-        $incipit = implode(' ', array_slice($words, 0, 3));
-
-        // Aggiungi nuovo e mantieni solo gli ultimi 3
-        $usedIncipits = getBotState('dj_incipits', []);
-        $usedIncipits[] = $incipit;
-        $usedIncipits = array_slice($usedIncipits, -3);
-        setBotState('dj_incipits', $usedIncipits);
-
-        error_log("[dj] Nuovo incipit salvato: $incipit");
+    if (!$parsed) {
+        file_put_contents($djLog, "HOOK: parse fallito, raw=" . substr($raw, 0, 300) . "\n", FILE_APPEND);
+        return null;
     }
 
-    // Se è una news HN, appendi il link e marca come postata
-    if (!empty($hnUrl)) {
-        $response .= "\n\n🔗 " . $hnUrl;
-    }
-    if ($hnStoryId !== null && $hnStory) {
-        markHNStoryPosted($hnStoryId, $hnStory['title']);
-        file_put_contents($djLog, "HN: story {$hnStoryId} marcata come postata\n", FILE_APPEND);
+    $hook = [
+        'argomenti'       => is_array($parsed['argomenti'] ?? null) ? $parsed['argomenti'] : [],
+        'c_e_materia'     => !empty($parsed['c_e_materia']),
+        'search_term'     => trim((string)($parsed['search_term'] ?? '')),
+        'cosa_aggiungere' => trim((string)($parsed['cosa_aggiungere'] ?? '')),
+    ];
+
+    file_put_contents($djLog, "HOOK: " . json_encode($hook, JSON_UNESCAPED_UNICODE) . "\n", FILE_APPEND);
+    return $hook;
+}
+
+/**
+ * STADIO 5 — giudice indipendente.
+ * Riceve dialogo, commento e fonte, ma NON l'istruzione a generare: un modello
+ * a cui hai appena chiesto di scrivere tende ad approvare il proprio lavoro.
+ * Controlla anche che il fatto affermato sia davvero nella fonte (anti-allucinazione).
+ *
+ * @return array ['promosso' => bool, 'motivo' => string]
+ */
+function _djJudge(string $context, string $comment, string $sourceExtract, string $mandato = ''): array {
+    $djLog = logPath('dj_debug');
+    $mandatoBlock = $mandato !== '' ? "\n\n### COSA DOVEVA FARE IL MESSAGGIO ###\n{$mandato}" : '';
+
+    $prompt = <<<PROMPT
+Sei il revisore di un bot che partecipa alle conversazioni di un gruppo di amici. Devi decidere se un messaggio scritto dal bot va pubblicato oppure scartato.
+
+Il bot non è obbligato a parlare: se il messaggio non aggiunge niente, scartarlo è la scelta giusta e non costa nulla.{$mandatoBlock}
+
+Rispondi SOLO con un oggetto JSON, senza altro testo:
+{"utile": true, "interessante": true, "congruo": true, "adeguato": true, "supportato": true, "promosso": true, "motivo": "..."}
+
+Criteri (valutali uno per uno):
+- "utile": aggiunge un'informazione che nella conversazione non c'era
+- "interessante": chi legge è contento di averlo saputo. Una nozione che chi parla di quell'argomento conosce già quasi certamente non lo è
+- "congruo": si aggancia a ciò di cui si sta parlando e arriva al momento giusto. Attenzione: NON pretendere che qualcuno abbia fatto una domanda. Il bot fa parte del gruppo e ha il permesso di intervenire di sua iniziativa, è esattamente il suo ruolo: "nessuno l'aveva chiesto" non è un motivo per scartare. Valuta solo se il tema e il momento sono quelli giusti
+- "adeguato": tono da amico nel gruppo, non da professore né da filosofo. Sono da scartare: le sentenze sulla natura umana, le frasi che si rivolgono agli altri come "voi umani" o simili, le chiuse a effetto, il tono predicatorio, le battute a spese di chi sta parlando. Attenzione a non confondere: un'informazione detta in modo semplice e diretto è adeguata, anche se il resto della chat è più colloquiale. Il difetto da punire è il tono che si mette in cattedra, non il fatto di dare un'informazione
+- "supportato": OGNI fatto affermato dal messaggio è contenuto nella FONTE qui sotto. Se il messaggio aggiunge dettagli che nella fonte non ci sono, "supportato" è false
+- "promosso": true solo se TUTTI e cinque i criteri sono true
+- "motivo": una riga sul perché, soprattutto se scarti
+
+Sii severo: nel dubbio, promosso = false.
+
+### CONVERSAZIONE ###
+{$context}
+
+### FONTE ###
+{$sourceExtract}
+
+### MESSAGGIO DA VALUTARE ###
+{$comment}
+PROMPT;
+
+    // Temperatura bassa: il verdetto deve essere stabile, non fantasioso.
+    $result = callOllamaChatViaQBert(
+        OLLAMA_MODEL,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.3]),
+        false,
+        QBertClient::PRIORITY_LAZY
+    );
+
+    if (!$result) {
+        file_put_contents($djLog, "JUDGE: QBert call failed -> scarto per sicurezza\n", FILE_APPEND);
+        return ['promosso' => false, 'motivo' => 'giudice non raggiungibile'];
     }
 
+    $raw = trim(stripThinkingTags($result['response'] ?? ''));
+    $parsed = _djParseJson($raw);
+
+    if (!$parsed) {
+        file_put_contents($djLog, "JUDGE: parse fallito -> scarto. raw=" . substr($raw, 0, 300) . "\n", FILE_APPEND);
+        return ['promosso' => false, 'motivo' => 'verdetto illeggibile'];
+    }
+
+    file_put_contents($djLog, "JUDGE: " . json_encode($parsed, JSON_UNESCAPED_UNICODE) . "\n", FILE_APPEND);
+
+    return [
+        'promosso' => !empty($parsed['promosso']),
+        'motivo'   => trim((string)($parsed['motivo'] ?? '')),
+    ];
+}
+
+/**
+ * Il DJ può ricadere su Hacker News solo se non l'ha già fatto di recente:
+ * senza tetto, e con il gate Wikipedia che fallisce spesso, il bot diventerebbe
+ * di fatto un feed di notizie tech invece di un partecipante alla conversazione.
+ */
+function _djCanUseHN(): bool {
+    $currentHour = (int)date('G');
+    if ($currentHour < 7 || $currentHour > 23) {
+        return false;
+    }
+    $lastHN = (int)getBotState('dj_last_hn_post', 0);
+    return (time() - $lastHN) / 3600 >= DJ_HN_MIN_HOURS;
+}
+
+/**
+ * Genera il commento spontaneo del DJ.
+ *
+ * @param int  $chatID    gruppo su cui leggere il contesto
+ * @param int  $hoursAgo  se > 0 usa la vecchia finestra oraria (retrocompat /dj)
+ * @param bool $explain   se true, quando il bot decide di tacere ritorna il motivo
+ *                        invece di stringa vuota (usato dal comando manuale /dj)
+ * @return string il messaggio da pubblicare, o '' se non c'è niente da dire
+ */
+function _dj($chatID, $hoursAgo = 0, $explain = false) {
+    $djLog = logPath('dj_debug');
+    $timestamp = date('Y-m-d H:i:s');
+    $ora = date('H:i');
+    file_put_contents($djLog, "\n=== DJ [$timestamp] hoursAgo=$hoursAgo ===\n", FILE_APPEND);
+
+    $silenzio = function (string $motivo) use ($djLog, $explain) {
+        file_put_contents($djLog, "SILENZIO: {$motivo}\n", FILE_APPEND);
+        return $explain ? "[DJ tace: {$motivo}]" : '';
+    };
+
+    // --- STADIO 1: contesto ---------------------------------------------------
+    if ($hoursAgo > 0) {
+        $text = getChatContextForHour($chatID, $hoursAgo, 100);
+        $context = ['text' => $text, 'user_ids' => [], 'count' => $text === '' ? 0 : count(explode("\n", $text))];
+    } else {
+        $context = getRecentChatContextForDJ($chatID);
+    }
+    file_put_contents($djLog, "Contesto: {$context['count']} messaggi, " . count($context['user_ids']) . " utenti\n", FILE_APPEND);
+
+    $profiles = buildDJUserProfiles($context['user_ids']);
+    if ($profiles !== '') {
+        file_put_contents($djLog, "Profili caricati:\n{$profiles}\n", FILE_APPEND);
+    }
+
+    // --- STADIO 2: aggancio fattuale nel dialogo -------------------------------
+    $hook = null;
+    if ($context['count'] >= 3) {
+        $hook = _djFindFactualHook($context['text'], $profiles);
+    } else {
+        file_put_contents($djLog, "Troppo pochi messaggi per cercare un aggancio\n", FILE_APPEND);
+    }
+
+    $topics = $hook['argomenti'] ?? [];
+
+    // --- STADIO 3: verifica su Wikipedia --------------------------------------
+    $source = null;      // testo della fonte iniettato nel prompt e passato al giudice
+    $sourceKind = null;  // 'wiki' | 'hn'
+    $hnStory = null;
+    $hnRelated = false;
+
+    if ($hook && $hook['c_e_materia'] && $hook['search_term'] !== '') {
+        $wiki = getWikipediaContext($hook['search_term']);
+        if ($wiki) {
+            $source = $wiki;
+            $sourceKind = 'wiki';
+            file_put_contents($djLog, "WIKI: verificato '{$hook['search_term']}'\n", FILE_APPEND);
+        } else {
+            file_put_contents($djLog, "WIKI: nessun riscontro per '{$hook['search_term']}'\n", FILE_APPEND);
+        }
+    }
+
+    // Fallback Hacker News: solo se il dialogo non ha dato materia verificabile
+    if ($source === null) {
+        if (!_djCanUseHN()) {
+            return $silenzio('nessun fatto verificabile nel dialogo e fallback HN non disponibile');
+        }
+
+        $stories = fetchHackerNewsTopStories(30);
+        $picked = pickBestHNStory($stories, $topics);
+
+        if (!$picked) {
+            return $silenzio('nessun fatto verificabile nel dialogo e nessuna storia HN disponibile');
+        }
+
+        $hnRelated = !empty($picked['related']);
+
+        // Se la notizia non c'entra, il messaggio è a tutti gli effetti un cambio
+        // di argomento: si può fare a conversazione ferma, non mentre stanno
+        // parlando d'altro. Irrompere con una notizia tech in mezzo a chi si sta
+        // organizzando per la cena è peggio che tacere.
+        $minutiFermi = $context['last_ts'] > 0 ? (time() - $context['last_ts']) / 60 : PHP_INT_MAX;
+        if (!$hnRelated && $minutiFermi < DJ_HN_QUIET_MINUTES) {
+            return $silenzio(sprintf(
+                'notizia HN non attinente e conversazione ancora viva (ultimo messaggio %d min fa)',
+                $minutiFermi
+            ));
+        }
+
+        $hnStory = $picked;
+
+        $newsContext = $picked['title'];
+        if (!empty($picked['url'])) {
+            $articleContent = fetchUrlContent($picked['url']);
+            if ($articleContent && !empty($articleContent['description'])) {
+                $newsContext .= "\n\nSommario: " . $articleContent['description'];
+            }
+        }
+
+        $source = "### NOTIZIA ###\n" . $newsContext;
+        $sourceKind = 'hn';
+        file_put_contents($djLog, "HN: fallback su '{$picked['title']}' (attinente: " . ($hnRelated ? 'sì' : 'no') . ")\n", FILE_APPEND);
+    }
+
+    // --- STADIO 4: generazione -------------------------------------------------
+    $formatter = new IntlDateFormatter('it_IT', IntlDateFormatter::FULL, IntlDateFormatter::NONE);
+    $oggi = ucfirst($formatter->format(new DateTime()));
+
+    $usedIncipits = getBotState('dj_incipits', []);
+    if (!is_array($usedIncipits)) {
+        $usedIncipits = [];
+    }
+    $incipitWarning = '';
+    if (!empty($usedIncipits)) {
+        $incipitWarning = "\n\nNON iniziare con queste parole, le hai già usate di recente:\n- " . implode("\n- ", $usedIncipits);
+    }
+
+    $persona = rootbotPersona();
+    $profileBlock = $profiles !== '' ? "\n\n### CHI STA PARLANDO ###\n{$profiles}\nUsali solo per calibrare il tono e rivolgerti alle persone come le conosci. Non commentare i profili." : '';
+
+    // Regole comuni: sono la parte che tiene lontano il registro da aforisma.
+    $regole = <<<REGOLE
+COME SCRIVERE:
+- Stai partecipando a una conversazione tra amici, non tenendo una conferenza
+- Porta l'informazione e basta: è quella il motivo per cui parli
+- UN SOLO fatto, quello che c'entra di più con quello che si stanno dicendo. Non riassumere la fonte, non incatenare più fatti insieme: uno, detto bene
+- I fatti, i nomi, le date e i rapporti fra le cose sono quelli della fonte e non li tocchi: se provi a renderli brillanti riformulandoli, finisci per dire una cosa falsa. La frase però è tua: scrivila come la diresti a voce a un amico, non come la copieresti da un'enciclopedia
+- Massimo 2-3 frasi, poi ti fermi
+- Non citare la fonte, non dire "ho letto che" né "secondo Wikipedia"
+- Non dire NIENTE che non sia nella fonte qui sopra: se non lo sai, non lo scrivi
+- Niente date, cifre, nomi o titoli che nella fonte non compaiono. Se la fonte non lo dice, quel dettaglio lo lasci fuori: meglio una frase in meno che un errore
+- Per dire come stanno le cose fra loro usa le parole della fonte (tratto da, adattamento, sequel, ispirato a): non sostituirle con altre a orecchio
+- Vietato il registro da riflessione filosofica: niente osservazioni sulla natura umana, niente frasi a effetto in chiusura
+- Non chiamare mai gli altri per la loro natura — né "voi umani", né "esseri biologici", né "cervelli di carne", né varianti — e non fare battute sulla tua superiorità di macchina. Sei uno del gruppo che parla con altri del gruppo: se il messaggio funzionerebbe uguale detto da una persona, sei sulla strada giusta
+- Vietato annunciare quello che stai facendo ("intervengo per dire", "mi permetto di aggiungere")
+- Vietato proporre approfondimenti o suggerire cosa si potrebbe leggere, guardare o considerare: l'informazione la dai tu, adesso, non la rimandi
+- L'ironia è facoltativa: se non viene naturale, il fatto da solo basta. E non è mai a spese di chi sta parlando — niente battute sulla loro confusione, sulla loro ignoranza o sul loro dibattito
+
+ESEMPIO. Fonte: "Blade Runner è un film del 1982 diretto da Ridley Scott, basato sul romanzo Il cacciatore di androidi di Philip K. Dick."
+- Buono: "Il romanzo da cui è tratto si chiama Il cacciatore di androidi, di Philip K. Dick."
+- Cattivo: "Il film è un remake del romanzo di Dick del 1968, ma tranquilli, la trama è meno confusa del vostro dibattito." (dice cose non nella fonte, e sfotte chi sta parlando)
+REGOLE;
+
+    if ($sourceKind === 'wiki') {
+        $cosaAggiungere = $hook['cosa_aggiungere'] !== ''
+            ? "\n\nQuello che manca alla conversazione: {$hook['cosa_aggiungere']}"
+            : '';
+
+        $prompt = <<<PROMPT
+### ISTRUZIONI ###
+{$persona}
+
+Stai seguendo la conversazione del gruppo e hai un'informazione pertinente che nessuno ha ancora detto. Inseriscila nel discorso, come farebbe uno del gruppo che quella cosa la sa.{$cosaAggiungere}
+
+{$regole}
+{$incipitWarning}
+
+Oggi è {$oggi}, ore {$ora}.
+
+### CONVERSAZIONE ###
+{$context['text']}{$profileBlock}
+
+### FONTE (verificata) ###
+{$source}
+
+### OUTPUT ###
+Solo il messaggio, niente altro.
+PROMPT;
+    } else {
+        $aggancio = $hnRelated
+            ? "Ha a che fare con quello di cui stanno parlando: aggancia il tuo intervento al discorso in corso."
+            : "Non c'entra con quello di cui stanno parlando, e loro hanno smesso di scrivere da un pezzo: stai riaprendo la chat con un argomento nuovo. Dillo in modo leggero e sbrigativo (del tipo \"cambio discorso:\" oppure \"comunque, niente a che vedere:\") e passa subito alla notizia. Non annunciare che è importante e non spiegare perché ne stai parlando: suonerebbe presuntuoso.";
+
+        $prompt = <<<PROMPT
+### ISTRUZIONI ###
+{$persona}
+
+Stai seguendo la conversazione del gruppo e hai intercettato una notizia da portare. {$aggancio}
+
+Racconta la notizia: che cosa è successo, in modo che chi legge capisca il fatto senza aprire il link.
+
+{$regole}
+{$incipitWarning}
+
+Oggi è {$oggi}, ore {$ora}.
+
+### CONVERSAZIONE ###
+{$context['text']}{$profileBlock}
+
+### FONTE (verificata) ###
+{$source}
+
+### OUTPUT ###
+Solo il messaggio, niente altro.
+PROMPT;
+    }
+
+    file_put_contents(logPath('ai'), "=== DJ REQUEST ===\n" . $prompt . "\n\n", FILE_APPEND);
+
+    // Temperatura sotto il default: al DJ serve aderire alla fonte, e a 1.0 il
+    // modello ricama aggiungendo date e dettagli che nella fonte non ci sono.
+    $result = callOllamaChatViaQBert(
+        OLLAMA_MODEL,
+        $prompt,
+        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.6]),
+        false,
+        QBertClient::PRIORITY_LAZY
+    );
+
+    if (!$result) {
+        return $silenzio('QBert non raggiungibile in generazione');
+    }
+
+    $response = trim(stripThinkingTags($result['response'] ?? ''));
+    if ($response === '') {
+        return $silenzio('generazione vuota');
+    }
+
+    file_put_contents(logPath('ai'), "=== DJ CANDIDATE ===\n" . $response . "\n\n", FILE_APPEND);
+
+    // --- STADIO 5: giudizio ----------------------------------------------------
+    // Il giudice deve sapere che mandato aveva il messaggio, altrimenti scarta per
+    // definizione: un intervento spontaneo gli sembra "non richiesto" e una notizia
+    // esterna gli sembra "fuori tema", che sono esattamente le cose che gli abbiamo
+    // chiesto di fare.
+    if ($sourceKind === 'wiki') {
+        $mandato = "Il bot si è inserito di sua iniziativa nella conversazione per portare un'informazione pertinente che nessuno aveva ancora detto. Intervenire senza che nessuno gliel'abbia chiesto è previsto e corretto: non è un motivo per scartare.";
+    } else {
+        $mandato = $hnRelated
+            ? "Il bot ha portato una notizia dall'esterno, attinente a ciò di cui si sta parlando."
+            : "Il bot ha portato una notizia dall'esterno che NON c'entra con la conversazione precedente. La conversazione è ferma da un pezzo e il bot la sta riaprendo con un argomento nuovo: il cambio di argomento è voluto e autorizzato, non scartare per questo motivo. Valuta invece se il cambio è dichiarato apertamente e se la notizia si capisce da sola senza aprire link.";
+    }
+
+    $verdict = _djJudge($context['text'], $response, $source, $mandato);
+    if (!$verdict['promosso']) {
+        return $silenzio('scartato dal giudice — ' . ($verdict['motivo'] ?: 'nessun motivo'));
+    }
+
+    // --- Pubblicazione ---------------------------------------------------------
+    // Incipit anti-ripetizione: salvati solo per i messaggi che vengono davvero fuori.
+    $words = preg_split('/\s+/', $response);
+    $usedIncipits[] = implode(' ', array_slice($words, 0, 3));
+    setBotState('dj_incipits', array_slice($usedIncipits, -3));
+
+    if ($sourceKind === 'hn' && $hnStory) {
+        if (!empty($hnStory['url'])) {
+            $response .= "\n\n🔗 " . $hnStory['url'];
+        }
+        markHNStoryPosted($hnStory['id'], $hnStory['title']);
+        setBotState('dj_last_hn_post', time());
+        file_put_contents($djLog, "HN: story {$hnStory['id']} marcata come postata\n", FILE_APPEND);
+    }
+
+    file_put_contents($djLog, "PROMOSSO ({$sourceKind}): " . substr($response, 0, 120) . "\n", FILE_APPEND);
     file_put_contents(logPath('ai'), "=== DJ RESPONSE ===\n" . $response . "\n\n", FILE_APPEND);
 
     return $response;
@@ -1438,7 +1773,18 @@ function setBotState($key, $value) {
     $stmt->execute();
 }
 
-function pickBestHNStory($stories) {
+/**
+ * Sceglie la storia HN da commentare.
+ *
+ * Se $topics contiene gli argomenti in discussione nel gruppo, le storie
+ * attinenti vengono preferite a quelle solo popolari: così il fallback resta
+ * dentro il discorso invece di irrompere con un cambio di argomento.
+ * La storia scelta porta 'related' => true quando l'attinenza è stata trovata.
+ *
+ * @param array $stories elenco da fetchHackerNewsTopStories()
+ * @param array $topics  parole chiave degli argomenti in corso (facoltativo)
+ */
+function pickBestHNStory($stories, array $topics = []) {
     $djLog = logPath('dj_debug');
 
     if (empty($stories)) return null;
@@ -1455,16 +1801,42 @@ function pickBestHNStory($stories) {
         return null;
     }
 
-    // Ordina per score + commenti (peso uguale)
+    // Parole chiave degli argomenti: scarta quelle troppo corte o generiche,
+    // che matcherebbero qualsiasi titolo producendo attinenze fasulle.
+    $keywords = [];
+    foreach ($topics as $topic) {
+        foreach (preg_split('/\W+/u', mb_strtolower((string)$topic)) as $word) {
+            if (mb_strlen($word) >= 5) {
+                $keywords[$word] = true;
+            }
+        }
+    }
+    $keywords = array_keys($keywords);
+
+    // Conta quante parole chiave compaiono nel titolo di ogni storia
+    $available = array_map(function($story) use ($keywords) {
+        $title = mb_strtolower($story['title']);
+        $hits = 0;
+        foreach ($keywords as $kw) {
+            if (mb_strpos($title, $kw) !== false) {
+                $hits++;
+            }
+        }
+        $story['related'] = $hits > 0;
+        $story['_hits'] = $hits;
+        return $story;
+    }, $available);
+
+    // Prima l'attinenza, poi la popolarità
     usort($available, function($a, $b) {
-        $scoreA = $a['score'] + $a['comments'];
-        $scoreB = $b['score'] + $b['comments'];
-        return $scoreB - $scoreA;
+        if ($a['_hits'] !== $b['_hits']) {
+            return $b['_hits'] - $a['_hits'];
+        }
+        return ($b['score'] + $b['comments']) - ($a['score'] + $a['comments']);
     });
 
-    // Prendi la migliore
     $best = reset($available);
-    file_put_contents($djLog, "HN: selezionata '{$best['title']}' (score: {$best['score']}, comments: {$best['comments']})\n", FILE_APPEND);
+    file_put_contents($djLog, "HN: selezionata '{$best['title']}' (score: {$best['score']}, comments: {$best['comments']}, attinente: " . ($best['related'] ? 'sì' : 'no') . ")\n", FILE_APPEND);
 
     return $best;
 }

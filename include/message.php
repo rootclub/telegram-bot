@@ -336,7 +336,9 @@ function processMessage($message) {
 
         // Se in chat privata, usa l'ID del gruppo principale
         $targetGroupId = ($chatType == 'private') ? -1001402757977 : $chatID;
-        $djMessage = _dj($targetGroupId, $hoursAgo);
+        // explain=true: se il DJ decide di tacere, il comando manuale mostra il
+        // motivo invece di non rispondere nulla (serve a tarare i gate).
+        $djMessage = _dj($targetGroupId, $hoursAgo, true);
 
         @unlink($lockFile);
 

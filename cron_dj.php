@@ -25,9 +25,13 @@ sleep(rand(0, 300));
 
 // Configurazione
 define('MAIN_GROUP_ID', -1001402757977);
-define('POST_PROBABILITY', 15);        // Probabilità % di postare (0-100)
+// Il dado decide solo se TENTARE. Se il tentativo produca o meno un messaggio lo
+// stabiliscono i gate qualitativi dentro _dj() (fatto verificabile su Wikipedia,
+// fallback HN col suo tetto, giudizio finale): per questo la probabilità è alta.
+define('POST_PROBABILITY', 40);        // Probabilità % di tentare (0-100)
 define('MIN_HOURS_BETWEEN_POSTS', 2);  // Minimo ore tra un post e l'altro
-define('MIN_MESSAGES_TO_POST', 3);     // Minimo messaggi nell'ultima ora per considerare
+define('MIN_MESSAGES_TO_POST', 3);     // Minimo messaggi recenti per tentare
+define('CONTEXT_WINDOW_HOURS', 6);     // Finestra su cui misurare l'attività del gruppo
 
 // Logging via logger centrale (visibile in logs/dj_debug.log, accessibile da diag.php).
 // Stesso canale usato da _dj()/fetchHN/ecc. in ai.php: così l'intera attività DJ
@@ -60,13 +64,22 @@ try {
         exit(0);
     }
 
-    // Controlla se ci sono abbastanza messaggi
-    $context = getChatContextForHour(MAIN_GROUP_ID, 0, 100);
-    $messageCount = empty(trim($context)) ? 0 : count(explode("\n", $context));
-    dj_log("Messaggi nell'ultima ora: $messageCount");
+    // Il gruppo deve essere stato vivo di recente: su una chat ferma da giorni
+    // non ha senso intervenire, nemmeno con una notizia. Finestra più larga
+    // dell'ora secca perché _dj() ragiona sugli ultimi messaggi, non sull'orologio.
+    // I messaggi di rootbot non contano come attività del gruppo.
+    $stmt = $db->prepare("
+        SELECT COUNT(*) AS c FROM contesto_chat
+        WHERE group_id = :group_id AND timestamp >= :since AND user_name != 'rootbot'
+    ");
+    $stmt->bindValue(':group_id', MAIN_GROUP_ID, SQLITE3_INTEGER);
+    $stmt->bindValue(':since', time() - CONTEXT_WINDOW_HOURS * 3600, SQLITE3_INTEGER);
+    $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+    $messageCount = (int)($row['c'] ?? 0);
+    dj_log("Messaggi nelle ultime " . CONTEXT_WINDOW_HOURS . "h: $messageCount");
 
     if ($messageCount < MIN_MESSAGES_TO_POST) {
-        dj_log("Troppi pochi messaggi, skip");
+        dj_log("Gruppo troppo fermo, skip");
         @unlink($lockFile);
         exit(0);
     }
@@ -81,12 +94,14 @@ try {
         exit(0);
     }
 
-    // Genera il messaggio DJ
+    // Genera il messaggio DJ. Stringa vuota = il bot ha deciso di tacere
+    // (nessun fatto verificabile, o commento scartato dal giudice): il motivo
+    // preciso è già finito in dj_debug.log dentro _dj().
     dj_log("Generazione messaggio DJ...");
     $djMessage = _dj(MAIN_GROUP_ID, 0);
 
-    if (empty($djMessage) || strpos($djMessage, 'Nessun messaggio') !== false) {
-        dj_log("Messaggio vuoto o errore, skip");
+    if (trim($djMessage) === '') {
+        dj_log("Niente da dire, skip");
         @unlink($lockFile);
         exit(0);
     }
@@ -99,6 +114,9 @@ try {
     if ($result['ok']) {
         dj_log("Messaggio inviato con successo!");
         setBotState('dj_last_post', time());
+        // Il DJ deve vedere i propri interventi nel contesto delle run successive,
+        // altrimenti torna sugli stessi argomenti senza accorgersene.
+        saveMessageToContext(MAIN_GROUP_ID, 'rootbot', $djMessage);
     } else {
         dj_log("Errore invio: err=" . ($result['error_code'] ?? '?') . " desc=" . ($result['description'] ?? ''));
     }
