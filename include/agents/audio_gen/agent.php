@@ -8,6 +8,10 @@
  */
 require_once dirname(__DIR__, 2) . '/logger.php';
 
+// Tetto all'attesa su ComfyUI: garantisce che il ciclo di poll termini sempre.
+// Più alto di image_gen perché un brano ACE-Step può arrivare a 240s di durata.
+if (!defined('AUDIO_GEN_POLL_TIMEOUT')) define('AUDIO_GEN_POLL_TIMEOUT', 420);
+
 $audioGenHandler = function (array $ctx, array $params): ?array {
         $logFile = logPath('audio_gen');
         $log = function (string $msg) use ($logFile) {
@@ -319,14 +323,16 @@ SYS;
         $log("Submitted to ComfyUI, prompt_id={$promptId}");
 
         // --- Step 5: Poll /history fino a output pronto ---
-        // Niente timeout locale: il QBertClient gestisce già attesa/timeout (600s),
-        // e in coda ComfyUI l'attesa legittima può superare i limiti locali.
+        // Il timeout del QBertClient (600s) vale sulla SINGOLA richiesta, non su questo
+        // ciclo: senza una deadline locale, un prompt che non completa mai terrebbe il
+        // processo PHP a girare all'infinito.
+        $deadline = time() + AUDIO_GEN_POLL_TIMEOUT;
         $lastActionTime = time();
         $pollInterval = 3.0;
         $outputFilename = null;
         $outputSubfolder = 'audio';
 
-        while (true) {
+        while (time() < $deadline) {
             if ((time() - $lastActionTime) >= 3) {
                 makeAPIRequest('sendChatAction', [
                     'chat_id' => $ctx['chatID'],

@@ -9,6 +9,10 @@
  */
 require_once dirname(__DIR__, 2) . '/logger.php';
 
+// Tetto all'attesa del branch ComfyUI. Hunyuan3D è pesante e la coda può essere
+// lunga, quindi è generoso; serve solo a garantire che il ciclo termini sempre.
+if (!defined('THREED_GEN_POLL_TIMEOUT')) define('THREED_GEN_POLL_TIMEOUT', 600);
+
 $gen3dHandler = function (array $ctx, array $params): ?array {
     $logFile = logPath('3d_gen');
     $log = function (string $msg) use ($logFile) {
@@ -253,14 +257,17 @@ PROMPT;
     $log("Submitted to ComfyUI, prompt_id={$promptId}");
 
     // --- Step 5: poll /history ---
-    // Niente timeout locale: il QBertClient gestisce già attesa/timeout (600s),
-    // e in coda ComfyUI l'attesa legittima può superare i limiti locali.
+    // Il timeout del QBertClient (600s) vale sulla SINGOLA richiesta, non su questo
+    // ciclo: senza una deadline locale, un prompt che non completa mai (errore ComfyUI,
+    // job perso) terrebbe il processo PHP a girare all'infinito. La soglia è larga
+    // perché in coda ComfyUI l'attesa legittima può essere lunga.
+    $deadline = time() + THREED_GEN_POLL_TIMEOUT;
     $lastActionTime = time();
     $pollInterval = 3.0;
     $outputFilename = null;
     $outputSubfolder = '';
 
-    while (true) {
+    while (time() < $deadline) {
         if ((time() - $lastActionTime) >= 3) {
             makeAPIRequest('sendChatAction', [
                 'chat_id' => $ctx['chatID'],

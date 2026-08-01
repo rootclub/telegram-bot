@@ -5,6 +5,9 @@
  */
 require_once dirname(__DIR__, 2) . '/logger.php';
 
+// Tetto all'attesa su ComfyUI: garantisce che il ciclo di poll termini sempre.
+if (!defined('IMAGE_GEN_POLL_TIMEOUT')) define('IMAGE_GEN_POLL_TIMEOUT', 300);
+
 $imageGenHandler = function (array $ctx, array $params): ?array {
         $logFile = logPath('image_gen');
         $log = function (string $msg) use ($logFile) {
@@ -179,13 +182,15 @@ SYS;
         }
 
         // --- Step 4: Poll /history fino a output pronto ---
-        // Niente timeout locale: il QBertClient gestisce già attesa/timeout (600s),
-        // e in coda ComfyUI l'attesa legittima può superare i limiti locali.
+        // Il timeout del QBertClient (600s) vale sulla SINGOLA richiesta, non su questo
+        // ciclo: senza una deadline locale, un prompt che non completa mai terrebbe il
+        // processo PHP a girare all'infinito.
+        $deadline = time() + IMAGE_GEN_POLL_TIMEOUT;
         $lastActionTime = time();
         $pollInterval = 2.0;
         $outputFilename = null;
 
-        while (true) {
+        while (time() < $deadline) {
             // Refresh upload_photo ogni 3s
             if ((time() - $lastActionTime) >= 3) {
                 makeAPIRequest('sendChatAction', [
