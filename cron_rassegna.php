@@ -18,10 +18,10 @@ require_once __DIR__ . '/include/telegram.php';
 $db = new SQLite3(__DIR__ . '/' . DB_FILE);
 
 // ID del gruppo principale
-define('MAIN_GROUP_ID', -1001402757977);
+if (!defined('MAIN_GROUP_ID')) define('MAIN_GROUP_ID', -1001402757977);
 
 // ID chat privata per test/debug
-define('DEBUG_CHAT_ID', 138516148);
+if (!defined('DEBUG_CHAT_ID')) define('DEBUG_CHAT_ID', 138516148);
 
 // URL della pagina news
 define('NEWS_URL', 'https://www.rootclub.it/news/');

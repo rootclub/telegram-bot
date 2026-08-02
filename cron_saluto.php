@@ -21,7 +21,7 @@ $db = new SQLite3(__DIR__ . '/' . DB_FILE);
 initDatabase();
 
 // ID del gruppo principale
-define('MAIN_GROUP_ID', -1001402757977);
+if (!defined('MAIN_GROUP_ID')) define('MAIN_GROUP_ID', -1001402757977);
 
 // Lock anti-duplicati (in /tmp per evitare problemi di permessi)
 $lockFile = '/tmp/saluto_cron.lock';

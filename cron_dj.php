@@ -24,7 +24,7 @@ initDatabase();
 sleep(rand(0, 300));
 
 // Configurazione
-define('MAIN_GROUP_ID', -1001402757977);
+if (!defined('MAIN_GROUP_ID')) define('MAIN_GROUP_ID', -1001402757977);
 // Il dado decide solo se TENTARE. Se il tentativo produca o meno un messaggio lo
 // stabiliscono i gate qualitativi dentro _dj() (fatto verificabile su Wikipedia,
 // fallback HN col suo tetto, giudizio finale): per questo la probabilità è alta.

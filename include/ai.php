@@ -14,6 +14,22 @@ function stripThinkingTags($text) {
     return trim(preg_replace('/<\|channel>thought\n.*?<channel\|>/s', '', $text));
 }
 
+// Finestra di contesto per i prompt lunghi che generano testo (_ai_core, _saluto).
+// Il default di Ollama è 4096 e non bastava già prima: misurato su ai.log, _ai_core
+// gira fra ~2100 e ~3960 token stimati, e un giro ha letto esattamente 4096 — cioè
+// aveva sbattuto sul soffitto senza che nessuno se ne accorgesse. Con la sezione di
+// memoria del gruppo iniettata ovunque si aggiungono ~800 token, quindi il tetto
+// verrebbe superato di routine. 16384 è lo stesso valore già in esercizio senza
+// problemi su questo hardware per il DJ (modello full) e per user_memory.php.
+if (!defined('AI_NUM_CTX')) define('AI_NUM_CTX', 16384);
+
+// Gruppo principale. Stava duplicato con lo stesso valore in cron_dj.php,
+// cron_saluto.php e cron_rassegna.php, e da nessun'altra parte: bot.php non ce
+// l'aveva, quindi era invisibile a tutto ciò che gira dal webhook — agenti compresi.
+// Sta qui e non in config.php per la stessa ragione delle costanti del DJ più sotto:
+// config.php non viene deployato. I define() nei cron restano, ma ora sono guardati.
+if (!defined('MAIN_GROUP_ID')) define('MAIN_GROUP_ID', -1001402757977);
+
 /**
  * Personalità condivisa di rootbot, usata come base in tutti i prompt AI
  */
@@ -69,7 +85,7 @@ function getQBertClient() {
  * @param string $prompt    Prompt inviato (solo per misurarne la lunghezza)
  * @param array|null $result Ritorno di callOllamaChatViaQBert()
  */
-function logPromptBudget(string $logFile, string $label, string $prompt, ?array $result): void {
+function logPromptBudget(string $logFile, string $label, string $prompt, ?array $result, ?int $numCtx = null): void {
     $chars = mb_strlen($prompt);
     // ~3.9 caratteri per token sull'italiano, misurato confrontando prompt_eval_count
     // con la lunghezza reale dei prompt del DJ. È una stima, il dato vero è 'letti'.
@@ -84,9 +100,15 @@ function logPromptBudget(string $logFile, string $label, string $prompt, ?array 
         $result['done_reason'] ?? '?'
     );
 
-    // Se il modello ha letto molto meno di quanto stimiamo di avergli mandato, il
-    // prompt è stato tagliato: quasi sempre num_ctx troppo basso per questo punto.
-    if ($letti !== null && $stima > 0 && $letti < $stima * 0.85) {
+    // Letti esattamente quanti ne entrano: è il taglio netto, e la soglia
+    // percentuale qui sotto non lo vede. È successo davvero — _ai_core ha girato
+    // con "~3960 token stimati, letti 4096" senza che niente lo segnalasse,
+    // perché 4096 è il 103% della stima e la stima era solo un po' bassa.
+    if ($letti !== null && $numCtx !== null && $letti >= $numCtx) {
+        $riga .= sprintf('  <-- TRONCATO al soffitto (letti %d = num_ctx): alzare num_ctx', $letti);
+    } elseif ($letti !== null && $stima > 0 && $letti < $stima * 0.85) {
+        // Se il modello ha letto molto meno di quanto stimiamo di avergli mandato,
+        // il prompt è stato tagliato: quasi sempre num_ctx troppo basso qui.
         $riga .= sprintf('  <-- SOSPETTA TRONCATURA (letti %d%% dello stimato): alzare num_ctx',
             (int)round($letti * 100 / $stima));
     }
@@ -904,8 +926,12 @@ function _ai_core($chatID, $chatType, $message, $userName = 'Utente', $wikiSecti
     $orario = date('H:i');
 
     $persona = rootbotPersona();
+    // Quello che il bot sa sul gruppo. Va in tutti i punti che generano testo, così
+    // le varie uscite (risposta, saluto, DJ, rassegna) non suonano scollegate fra loro.
+    require_once __DIR__ . '/group_memory.php';
+    $memoriaGruppo = groupMemorySection((int)$chatID);
     $instructions = <<<INSTR
-{$persona}
+{$persona}{$memoriaGruppo}
 - Sei diretto e vai al punto, ma quando serve approfondisci senza problemi
 
 Info pratiche che conosci:
@@ -961,7 +987,7 @@ PROMPT;
         $model,
         $prompt,
         $chatID,
-        ollamaOptions(OLLAMA_MODEL_GPU),
+        ollamaOptions(OLLAMA_MODEL_GPU, ['num_ctx' => AI_NUM_CTX]),
         false,
         QBertClient::PRIORITY_NORMAL
     );
@@ -970,9 +996,10 @@ PROMPT;
         return "Si è verificato un errore durante la comunicazione con l'AI.";
     }
 
-    // Il prompt qui cresce con il contesto conversazione, i profili utente e la
-    // sezione Wikipedia: quanto arrivi davvero al modello va misurato, non supposto.
-    logPromptBudget(logPath('ai'), 'ai_core', $prompt, $result);
+    // Il prompt qui cresce con il contesto conversazione, i profili utente, la
+    // sezione Wikipedia e la memoria del gruppo: quanto arrivi davvero al modello
+    // va misurato, non supposto.
+    logPromptBudget(logPath('ai'), 'ai_core', $prompt, $result, AI_NUM_CTX);
 
     $response = $result['response'] ?? '';
 
@@ -1015,7 +1042,7 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout
     $result = callOllamaChatViaQBert(
         $model,
         $prompt,
-        ollamaOptions(OLLAMA_MODEL_GPU),
+        ollamaOptions(OLLAMA_MODEL_GPU, ['num_ctx' => AI_NUM_CTX]),
         false,
         QBertClient::PRIORITY_LAZY
     );
@@ -1033,9 +1060,9 @@ function _callOllamaWithDiagnostics($prompt, $logFile, $label = 'call', $timeout
     $response = trim($response);
 
     file_put_contents($logFile, "[$label] QBert OK, time: {$elapsed}s, response length: " . strlen($response) . "\n", FILE_APPEND);
-    // _saluto lavora su un'intera giornata di messaggi: è il candidato più probabile
-    // a sbattere contro num_ctx. Qui non alziamo niente a occhio — prima misuriamo.
-    logPromptBudget($logFile, $label, $prompt, $result);
+    // _saluto lavora su un'intera giornata di messaggi: è il punto che più di tutti
+    // rischia di sbattere contro num_ctx, e ora la riga lo dice a chiare lettere.
+    logPromptBudget($logFile, $label, $prompt, $result, AI_NUM_CTX);
 
     return $response;
 }
@@ -1070,12 +1097,12 @@ PROMPT;
 /**
  * Genera il saluto finale dai riassunti (che già contengono info sui link)
  */
-function _generateFinalSaluto($summaries, $oggi, $logFile) {
+function _generateFinalSaluto($summaries, $oggi, $logFile, $memoriaGruppo = '') {
     $allSummaries = implode("\n", $summaries);
 
     $persona = rootbotPersona();
     $prompt = <<<PROMPT
-{$persona}
+{$persona}{$memoriaGruppo}
 È sera e osservi quello che gli umani hanno detto oggi.
 
 Oggi è {$oggi}.
@@ -1092,6 +1119,10 @@ PROMPT;
 
 function _saluto($chatID, $daysAgo = 0) {
     $logFile = logPath('saluto');
+    require_once __DIR__ . '/group_memory.php';
+    // Calcolata una volta e passata a valle: _generateFinalSaluto() il group id non
+    // ce l'ha, e non ha senso rileggerla dal DB per ogni blocco.
+    $memoriaGruppo = groupMemorySection((int)$chatID);
 
     // Log di inizio
     file_put_contents($logFile, "\n=== SALUTO START " . date('Y-m-d H:i:s') . " ===\n", FILE_APPEND);
@@ -1140,7 +1171,7 @@ function _saluto($chatID, $daysAgo = 0) {
 
         $persona = rootbotPersona();
         $prompt = <<<PROMPT
-{$persona}
+{$persona}{$memoriaGruppo}
 È sera e osservi quello che gli umani hanno detto oggi.
 
 Oggi è {$oggi}.
@@ -1200,7 +1231,7 @@ PROMPT;
 
     // Fase 2: genera saluto finale
     file_put_contents($logFile, "Generating final saluto...\n", FILE_APPEND);
-    $response = _generateFinalSaluto($summaries, $oggi, $logFile);
+    $response = _generateFinalSaluto($summaries, $oggi, $logFile, $memoriaGruppo);
 
     file_put_contents($logFile, "=== SALUTO END ===\n", FILE_APPEND);
     return $response ?: "";
@@ -1490,7 +1521,7 @@ PROMPT;
         return null;
     }
 
-    logPromptBudget($djLog, 'HOOK', $prompt, $result);
+    logPromptBudget($djLog, 'HOOK', $prompt, $result, DJ_NUM_CTX);
 
     $raw = trim(stripThinkingTags($result['response'] ?? ''));
     $parsed = extractJsonObject($raw);
@@ -1825,6 +1856,8 @@ function _dj($chatID, $hoursAgo = 0, $explain = false) {
     }
 
     $persona = rootbotPersona();
+    require_once __DIR__ . '/group_memory.php';
+    $memoriaGruppo = groupMemorySection((int)$chatID);
     $profileBlock = $profiles !== '' ? "\n\n### CHI STA PARLANDO ###\n{$profiles}\nUsali solo per calibrare il tono e rivolgerti alle persone come le conosci. Non commentare i profili." : '';
 
     // Regole comuni: sono la parte che tiene lontano il registro da aforisma.
@@ -1857,7 +1890,7 @@ REGOLE;
 
         $prompt = <<<PROMPT
 ### ISTRUZIONI ###
-{$persona}
+{$persona}{$memoriaGruppo}
 
 Stai seguendo la conversazione del gruppo e hai un'informazione pertinente che nessuno ha ancora detto. Inseriscila nel discorso, come farebbe uno del gruppo che quella cosa la sa.{$cosaAggiungere}
 
@@ -1882,7 +1915,7 @@ PROMPT;
 
         $prompt = <<<PROMPT
 ### ISTRUZIONI ###
-{$persona}
+{$persona}{$memoriaGruppo}
 
 Stai seguendo la conversazione del gruppo e hai intercettato una notizia da portare. {$aggancio}
 

@@ -54,9 +54,15 @@ if (PHP_SAPI !== 'cli') {
 require_once __DIR__ . '/include/database.php';
 require_once __DIR__ . '/include/api.php';
 require_once __DIR__ . '/include/ai.php';
+require_once __DIR__ . '/include/group_memory.php';
 
 $db = new SQLite3(__DIR__ . '/' . DB_FILE);
 initDatabase();
+
+// Le tabelle degli agenti le crea initAgentSchemas(), che pero' gira solo dove e'
+// caricato il dispatcher (bot.php). Qui il registro degli agenti non serve, quindi
+// lo schema della memoria di gruppo lo chiamiamo diretto: e' idempotente.
+initGroupMemorySchema($db);
 
 // Oltre questo tempo non si avviano altri task: il tick è ogni 15 minuti e due
 // esecuzioni sovrapposte non servono a nessuno. Un task già partito finisce.
@@ -71,17 +77,13 @@ define('TASKS_TICK_BUDGET', 600);
  * 'run'   = callable che ritorna un array con almeno 'status' e 'detail'.
  */
 $TASKS = [
-    // Nessun task registrato al momento.
-    //
-    // Esempio di voce:
-    //   'nome' => [
-    //       'descrizione' => 'cosa fa, in una riga',
-    //       'ogni'        => 900,                       // secondi minimi fra due giri
-    //       'run'         => fn(): array => faiLaCosa(), // ritorna ['status'=>..,'detail'=>..]
-    //   ],
-    //
-    // Il modello da seguire per un lavoro incrementale e' cron_memory.php: un
-    // cursore sui messaggi gia' processati, un batch per giro, priorita' LAZY.
+    'group_memory' => [
+        'descrizione' => 'appunti del bot sul gruppo',
+        // Un'ora: sono fatti e convenzioni, cose che cambiano lentamente. Piu' spesso
+        // vorrebbe dire riscrivere il prompt di sistema di continuo per niente.
+        'ogni'        => 3600,
+        'run'         => fn(): array => updateGroupMemory(MAIN_GROUP_ID),
+    ],
 ];
 
 // --- parametri -------------------------------------------------------------
@@ -96,11 +98,20 @@ if (PHP_SAPI !== 'cli') {
     if (isset($_GET['list']))            { $argv[] = '--list'; }
     if (!empty($_GET['task']))           { $argv[] = '--task=' . preg_replace('/[^a-z0-9_-]/i', '', (string)$_GET['task']); }
     if (!empty($_GET['force']))          { $argv[] = '--force'; }
+    if (!empty($_GET['reset_group_memory'])) { $argv[] = '--reset-group-memory'; }
 }
 
 foreach (array_slice($argv ?? [], 1) as $arg) {
     if ($arg === '--force') {
         $force = true;
+    } elseif ($arg === '--reset-group-memory') {
+        // Manutenzione: riparte da appunti vuoti e cursore a zero. Il blocco corretto
+        // dall'amministratore NON viene toccato, che e' tutto il punto di tenerlo separato.
+        global $db;
+        $db->exec("UPDATE memoria_gruppo SET osservato = '', last_processed_id = 0");
+        logLine('group_memory', 'RESET: appunti osservati e cursore azzerati (blocco corretto intatto)');
+        echo "appunti osservati azzerati, blocco corretto intatto\n";
+        exit(0);
     } elseif ($arg === '--list') {
         foreach ($TASKS as $nome => $t) {
             $last = (int)getBotState("task_last_{$nome}", 0);

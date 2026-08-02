@@ -37,6 +37,7 @@ This is a PHP-based Telegram bot that handles group chat interactions with vario
 - `image.php`: Image download and storage handling
 - `help.php`: Help command responses
 - `user_memory.php`: User profile memory system (extractors, aggregators)
+- `group_memory.php`: Group memory — the variable part of the system prompt. Two blocks (`osservato` written by cron, `corretto` written only by admins), injected into every text-generating prompt
 - `QBertClient.php`: LLM queue client (ticket-based polling, priority levels)
 
 ### Sub-Agent System (`include/agents/` directory)
@@ -196,7 +197,7 @@ Since the trigger is a plain regex on the user's text, the keyword must appear i
 - **`cron_saluto.php`** — Daily evening recap at 23:50, calls `_saluto()` and sends to main group with TTS button
 - **`cron_dj.php`** — Spontaneous DJ commentary. **Runs every 15 minutes**, not hourly (measured: median gap of 14.9 min between runs, plus the script's own `sleep(rand(0,300))` jitter), Hacker News integration, configurable probability (80%), min 2h between posts, min 3 messages in the last 6h to trigger. The dice only decide whether to *attempt*: whether anything is actually posted depends on the quality gates inside `_dj()` (verifiable Wikipedia fact, HN fallback with its own cap, final LLM judge). Both source branches deduplicate against what has already been published: HN via the `hn_posted` table, Wikipedia via `bot_state['dj_wiki_terms']` (last 15 entry titles, 7-day window). The wiki list is both injected into the hook prompt — so the model looks for a different angle instead of falling silent — and enforced after it, before the Wikipedia lookup. Entries are burned only on actual publication, so a run rejected by the judge does not consume one
 - **`cron_rassegna.php`** — Morning press digest at 08:00, fetches from rootclub.it/news/. Considers articles from the last 48h (buffer against skipped runs); dedup via `rassegna_posted` table (URL as PK) ensures no duplicates across days
-- **`cron_tasks.php`** — Generic scheduler for batch jobs, every 15 minutes. Currently holds **no tasks** — it is the infrastructure, kept for the next batch job. Holds a `$TASKS` registry (`descrizione`, `ogni` = minimum seconds between runs, `run` = callable); last-run timestamps live in `bot_state` under `task_last_{name}`. Own lock in `/tmp/rootbot_tasks.lock`, released after `TASKS_TICK_BUDGET` (600s) if a run dies. Tasks that don't start because the tick budget ran out are logged explicitly, so a backlog that never shrinks doesn't look like a backlog that was already empty. CLI: `--list`, `--task=name`, `--force`. Every task runs at `PRIORITY_LAZY` — that, not a scheduling trick, is how GPU contention is handled. Deliberately *not* grafted onto `cron_dj.php`'s early-exit branches: that would couple unrelated features through the DJ's lock and its posting cadence
+- **`cron_tasks.php`** — Generic scheduler for batch jobs, every 15 minutes. Currently runs one task: `group_memory` (hourly, see "Group Memory"). Holds a `$TASKS` registry (`descrizione`, `ogni` = minimum seconds between runs, `run` = callable); last-run timestamps live in `bot_state` under `task_last_{name}`. Own lock in `/tmp/rootbot_tasks.lock`, released after `TASKS_TICK_BUDGET` (600s) if a run dies. Tasks that don't start because the tick budget ran out are logged explicitly, so a backlog that never shrinks doesn't look like a backlog that was already empty. CLI: `--list`, `--task=name`, `--force`. Every task runs at `PRIORITY_LAZY` — that, not a scheduling trick, is how GPU contention is handled. Deliberately *not* grafted onto `cron_dj.php`'s early-exit branches: that would couple unrelated features through the DJ's lock and its posting cadence
 
 ## Database Schema
 
@@ -254,6 +255,11 @@ Since the trigger is a plain regex on the user's text, the keyword must appear i
     - UNIQUE on `(group_id, telegram_msg_id)` for idempotent import
 
 22. **image_gen_usage**, **audio_gen_usage**, **threed_gen_usage** — rate-limit tables owned by the `image_gen`, `audio_gen` and `3d_gen` agents respectively (schema in each agent's `agent.php`). Auto-cleanup: 1 hour.
+
+24. **memoria_gruppo** / **memoria_gruppo_versioni** — group memory (see "Group Memory")
+    - `group_id` (PK), `osservato`, `corretto`, `last_processed_id`, `updated_at`
+    - Versions keep the last `GROUP_MEMORY_KEEP_VERSIONS` (20) *previous* texts per block, for diff and rollback
+    - Declared by the `group_memory` agent's `schema`, and directly by `cron_tasks.php` (which doesn't load the agent registry)
 
 23. **rassegna_posted** - Articles already posted by morning press digest (dedup)
     - `url` (PK), `title`, `posted_at`
@@ -316,7 +322,33 @@ Canali attivi:
 - `logs/memory_cron.log` — Nightly user-memory cron job
 - `logs/quiz.log` — Quiz generation pipeline
 - `logs/tasks.log` — `cron_tasks.php` scheduler: what ran, what was skipped and why
+- `logs/group_memory.log` — Group memory: full block text on every change, diff counts, cursor
 - `logs/telegram.log` — Telegram API wrapper (retry, errors)
+
+### Group Memory (variable system prompt)
+
+`rootbotPersona()` stays a constant — the bot's character is not up for negotiation. `include/group_memory.php` holds what the bot has *learned* about the group: facts and conventions, names, who handles what. It is injected into `_ai_core()`, both `_saluto()` prompts and both `_dj()` generation branches, so the bot's various outputs sound like one head rather than disconnected features. (`cron_rassegna.php` uses no LLM, so there is nothing to inject there; `_suggerisci_comando()` and the DJ hook/judge stages are deliberately excluded — they're classifiers, group lore would only cost tokens.)
+
+**Two blocks, and the separation is the whole design:**
+
+| block | written by | can cron overwrite it? |
+|---|---|---|
+| `osservato` | the hourly cron, from real messages | yes, every run |
+| `corretto` | **only a group admin**, from private chat | **never** |
+
+They're concatenated at injection time with `corretto` **last**, so on contradiction the admin wins. Without this the feature would die on first use: admin corrects at 15:00, cron regenerates at 15:30, correction gone, nobody ever uses the command again. It's also the defence against prompt injection — a troll can pollute `osservato`, but the admin's rebuttal in `corretto` cannot be automatically overwritten.
+
+**The cron asks for a diff, not a rewrite.** `buildGroupMemoryPrompt()` numbers the existing lines and requests `{"aggiungi": [...], "rimuovi": [n, ...]}`; `applyGroupMemoryDiff()` (pure, DB-free, unit-tested) applies it in PHP. This is not a style choice — rewriting the whole block each hour is photocopying a photocopy. Measured over five real iterations of the earlier full-rewrite version: `root_camp_fratta` → `root_camp_francia`, `piedi di cobalto/balsa` → `buna`, `riferimenti surreali` → `riferella surreoli` (not Italian), plus a hard cut mid-word. With diffs the existing lines never pass through the model's output and survive verbatim.
+
+Guards in `applyGroupMemoryDiff()`: out-of-range line numbers ignored; a request to delete *every* line is refused wholesale; near-duplicates dropped via punctuation-insensitive comparison; added lines capped at 300 chars and rejected under 10. `groupMemoryJoinLines()` enforces `GROUP_MEMORY_MAX_LEN` (2000) by dropping **whole lines from the end**, except when a single line already exceeds the cap — then it's truncated, because emptying the block is worse. Failed JSON parse logs its own distinct cause and does **not** advance the cursor.
+
+**Known limitation:** a line that is garbled *at insertion* stays garbled — freezing protects against decay but not against a bad birth. That's what the admin correction path is for.
+
+The full block text is written to `logs/group_memory.log` on every change, not just its length: it enters every prompt and rewrites itself hourly, so the on-disk history is the only way to diagnose drift later.
+
+**Admin interface** — the `group_memory` sub-agent, private chat only, admins only. Natural language, no slash commands: "cosa hai capito del gruppo?", "aggiungi che...", "togli la parte su...", "com'era prima?". Note `groupMemoryUserIsAdmin()` checks against `MAIN_GROUP_ID`, **not** the current chat — in a private chat nobody is an administrator, so checking `$chatID` would always deny.
+
+Maintenance: `cron_tasks.php --reset-group-memory` clears `osservato` and the cursor, leaving `corretto` untouched.
 
 ### Removed features
 
@@ -343,5 +375,5 @@ Key settings in `config.php`:
 - Locale set to Italian (`it_IT.utf8`) with Rome timezone
 
 ### Telegram IDs
-- `MAIN_GROUP_ID`: -1001402757977 (gruppo principale)
+- `MAIN_GROUP_ID`: -1001402757977 (gruppo principale) — defined in `include/ai.php`, **not** in `config.php` (which isn't deployed). The three cron scripts still define it too, but guarded with `if (!defined(...))`
 - `DEBUG_CHAT_ID`: 138516148 (chat privata per test/debug, evita spam sul gruppo)
