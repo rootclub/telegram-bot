@@ -362,7 +362,11 @@ The full block text is written to `logs/group_memory.log` on every change, not j
 
 **Admin interface** — the `group_memory` sub-agent, private chat only, admins only. Natural language, no slash commands: "cosa hai capito del gruppo?", "aggiungi che...", "togli la parte su...", "com'era prima?". Note `groupMemoryUserIsAdmin()` checks against `MAIN_GROUP_ID`, **not** the current chat — in a private chat nobody is an administrator, so checking `$chatID` would always deny.
 
-Maintenance: `cron_tasks.php --reset-group-memory` clears `osservato` and the cursor, leaving `corretto` untouched.
+The edit path uses a diff too, over **both** blocks: `groupMemoryPlanEdit()` returns `{"a_rimuovi": [n], "b_aggiungi": [...], "b_rimuovi": [n]}`, where A is `osservato` (admins may only *remove* — adding there is pointless, the cron rewrites it) and B is `corretto`. Correcting a bad line therefore means: drop it from A, put the fixed sentence in B. That also stops the cron re-adding it, since `corretto` is fed to the cron prompt as already-established and not-to-be-repeated.
+
+The first version rewrote `corretto` wholesale, and failed on its first real use: asked to fix a word inside a line the *cron* had written, it edited the wrong block (leaving the bad line in place) and replaced `corretto` with the single word "espressioni". `applyGroupMemoryDiff()` takes `$consentiSvuotamento` — false for the cron (a model asking to delete everything has lost the plot), true for the admin path (an explicit human order, reversible from history). The handler now reports what actually changed and says so plainly when nothing did; the old one claimed success unconditionally.
+
+Maintenance: `cron_tasks.php --reset-group-memory` clears `osservato` and the cursor, leaving `corretto` untouched; `--clear-corretto` empties `corretto` (previous text kept in history).
 
 ### Removed features
 

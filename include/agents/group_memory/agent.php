@@ -37,45 +37,74 @@ function groupMemoryTargetGroup(): int {
 }
 
 /**
- * Applica una correzione in linguaggio naturale al blocco `corretto`.
+ * Traduce una correzione in linguaggio naturale in un diff sui DUE blocchi.
  *
- * Il testo non viene ricostruito da zero: si passa quello attuale e la richiesta,
- * e si chiede una riscrittura. Così "togli la parte su X" e "aggiungi che Y"
- * funzionano allo stesso modo senza doverli distinguere a monte.
+ * Prima versione sbagliata, per memoria: chiedeva al modello di riscrivere per
+ * intero il solo blocco `corretto`. Due conseguenze, viste entrambe in produzione
+ * al primo utilizzo reale. Primo, una richiesta del tipo "correggi espressionmente
+ * in espressione" riguarda una riga scritta dal cron, che sta in `osservato`: il
+ * blocco sbagliato veniva modificato e la riga storta restava dov'era. Secondo, la
+ * riscrittura integrale di un blocco vuoto ha prodotto la sola parola "espressioni",
+ * spazzando via il blocco che per costruzione doveva essere il piu' protetto.
  *
- * @return string|null il nuovo testo, o null se la chiamata è fallita
+ * Ora si chiede un diff, come gia' fa il cron per la stessa ragione: quello che
+ * non viene nominato non passa dal modello e resta intatto. E l'amministratore
+ * puo' togliere righe da `osservato`, che e' il modo naturale di correggere un
+ * errore del bot; le righe positive invece finiscono in `corretto`, dove il cron
+ * non arriva. Nota utile: cio' che sta in `corretto` viene passato al prompt del
+ * cron come gia' stabilito e da non ripetere, quindi una riga corretta a mano
+ * scoraggia da sola il ritorno di quella sbagliata.
+ *
+ * @return array|null il diff grezzo del modello, o null se la chiamata fallisce
  */
-function groupMemoryApplyEdit(string $attuale, string $richiesta): ?string {
-    $maxLen  = GROUP_MEMORY_MAX_LEN;
-    $attualeBlock = trim($attuale) !== ''
-        ? sanitizeMessageForPrompt($attuale, true)
-        : '(vuoto, non c\'è ancora niente)';
+function groupMemoryPlanEdit(array $memoria, string $richiesta): ?array {
+    $numera = function (string $testo): string {
+        $righe = groupMemoryLines($testo);
+        if ($righe === []) {
+            return '(vuoto)';
+        }
+        $out = [];
+        foreach ($righe as $i => $r) {
+            $out[] = ($i + 1) . '. ' . $r;
+        }
+        return implode("\n", $out);
+    };
+
+    $bloccoA = $numera(sanitizeMessageForPrompt($memoria['osservato'], true));
+    $bloccoB = $numera(sanitizeMessageForPrompt($memoria['corretto'], true));
     $richiestaClean = sanitizeMessageForPrompt($richiesta, true);
 
     $prompt = <<<PROMPT
-Stai modificando un elenco di fatti su un gruppo Telegram. Un amministratore ti chiede una modifica: applicala e restituisci l'elenco completo aggiornato.
+Un amministratore ti chiede di correggere i tuoi appunti su un gruppo Telegram. Gli appunti stanno in due elenchi separati. Traduci la sua richiesta in un elenco di modifiche.
 
-ELENCO ATTUALE:
-{$attualeBlock}
+ELENCO A — quello che hai scritto tu leggendo la chat (puoi solo TOGLIERE righe):
+{$bloccoA}
+
+ELENCO B — quello che ti hanno dettato gli amministratori (puoi togliere e aggiungere):
+{$bloccoB}
 
 RICHIESTA DELL'AMMINISTRATORE:
 {$richiestaClean}
 
-REGOLE:
-- Applica SOLO la modifica richiesta. Tutto il resto resta identico, parola per parola.
-- Se chiede di aggiungere, aggiungi una riga. Se chiede di togliere, togli la riga. Se chiede di correggere, riscrivi solo quella riga.
-- Frasi brevi, una per riga, in italiano. Niente titoli, niente markdown, niente simboli di elenco.
-- Se la richiesta non è una modifica all'elenco ma una domanda o una chiacchiera, restituisci l'elenco attuale invariato.
-- Massimo {$maxLen} caratteri.
-- Rispondi con il solo elenco aggiornato, senza preamboli e senza commenti.
+COME RAGIONARE:
+- Se contesta una cosa che hai scritto tu, la riga sta quasi sempre nell'ELENCO A: mettine il numero in "a_rimuovi".
+- Se ti chiede di correggere il testo di una riga dell'ELENCO A, togli quella riga da A e metti la versione giusta, per intero e con le sue parole, in "b_aggiungi".
+- Se ti chiede di aggiungere un'informazione nuova, va in "b_aggiungi" e basta.
+- Se ti chiede di togliere qualcosa che sta nell'ELENCO B, mettine il numero in "b_rimuovi".
+- Se la richiesta non e' una modifica agli appunti (una domanda, una chiacchiera), lascia tutte e tre le liste vuote.
 
-ELENCO AGGIORNATO:
+Rispondi SOLO con questo oggetto JSON:
+{"a_rimuovi": [numeri], "b_aggiungi": ["frase intera"], "b_rimuovi": [numeri]}
+
+- I numeri sono quelli degli elenchi qui sopra, ognuno riferito al proprio elenco.
+- Le frasi di "b_aggiungi" devono stare in piedi da sole: una frase compiuta, non una parola sciolta. "espressioni" non e' una frase; "Si usano espressioni in dialetto romagnolo (es. indarli per tarlato)" lo e'.
+- Non toccare righe che l'amministratore non ha nominato.
 PROMPT;
 
     $result = callOllamaChatViaQBert(
         OLLAMA_MODEL,
         $prompt,
-        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.2, 'num_ctx' => AI_NUM_CTX]),
+        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.1, 'num_ctx' => AI_NUM_CTX]),
         false,
         QBertClient::PRIORITY_NORMAL
     );
@@ -83,8 +112,14 @@ PROMPT;
     if (!$result) {
         return null;
     }
-    $nuovo = trim(stripThinkingTags($result['response'] ?? ''));
-    return $nuovo !== '' ? $nuovo : null;
+    $raw    = trim(stripThinkingTags($result['response'] ?? ''));
+    $parsed = extractJsonObject($raw);
+
+    if (!is_array($parsed)) {
+        logLine('group_memory', 'edit: parse fallito, raw=' . substr($raw, 0, 200));
+        return null;
+    }
+    return $parsed;
 }
 
 return [
@@ -140,15 +175,62 @@ return [
 
         // --- modifica --------------------------------------------------------
         if ($azione === 'modifica' && $richiesta !== '') {
-            $nuovo = groupMemoryApplyEdit($memoria['corretto'], $richiesta);
-            if ($nuovo === null) {
-                return ['response' => "Ho provato ad aggiornare gli appunti ma non mi ha risposto nessuno. Riprova fra poco."];
+            $piano = groupMemoryPlanEdit($memoria, $richiesta);
+            if ($piano === null) {
+                return ['response' => "Ho provato a metterci mano ma non mi ha risposto nessuno. Riprova fra poco."];
             }
-            if (!saveGroupMemoryBlock($groupId, 'corretto', $nuovo, $userName)) {
-                return ['response' => "Qualcosa è andato storto nel salvataggio, non ho cambiato niente."];
+
+            $righeA = groupMemoryLines($memoria['osservato']);
+            $righeB = groupMemoryLines($memoria['corretto']);
+
+            // Su `osservato` l'amministratore puo' solo togliere: aggiungere li'
+            // sarebbe inutile, perche' il cron riscrive quel blocco.
+            $diffA = applyGroupMemoryDiff($righeA, ['aggiungi' => [], 'rimuovi' => $piano['a_rimuovi'] ?? []], true);
+            $diffB = applyGroupMemoryDiff($righeB, [
+                'aggiungi' => $piano['b_aggiungi'] ?? [],
+                'rimuovi'  => $piano['b_rimuovi'] ?? [],
+            ], true);
+
+            foreach (array_merge($diffA['note'], $diffB['note']) as $n) {
+                logLine('group_memory', 'edit: ' . $n);
             }
-            return ['response' => "Fatto. Ora la parte che mi hai dettato tu dice:\n\n" . $nuovo
-                                . "\n\nQuesta non la tocco più da solo: resta finché non me la cambi."];
+
+            $cambiato = $diffA['rimosse'] + $diffB['aggiunte'] + $diffB['rimosse'];
+            if ($cambiato === 0) {
+                // Dirlo e' importante: la prima versione rispondeva "fatto, ho rimosso
+                // quel glitch" anche quando non aveva rimosso niente, e chi legge non
+                // ha modo di accorgersene se non ricontrollando.
+                return ['response' => "Non ho capito cosa cambiare, quindi non ho toccato niente. "
+                                    . "Prova a dirmelo citando la riga, tipo \"togli la riga sul dialetto\"."];
+            }
+
+            if ($diffA['rimosse'] > 0) {
+                saveGroupMemoryBlock($groupId, 'osservato',
+                    groupMemoryJoinLines($diffA['righe'])['testo'], $userName);
+            }
+            if ($diffB['aggiunte'] > 0 || $diffB['rimosse'] > 0) {
+                saveGroupMemoryBlock($groupId, 'corretto',
+                    groupMemoryJoinLines($diffB['righe'])['testo'], $userName);
+            }
+
+            $pezzi = [];
+            if ($diffA['rimosse'] > 0) {
+                $pezzi[] = $diffA['rimosse'] . ' riga' . ($diffA['rimosse'] > 1 ? 'he' : '') . ' tolta dai miei appunti';
+            }
+            if ($diffB['rimosse'] > 0) {
+                $pezzi[] = $diffB['rimosse'] . ' tolta da quello che mi avevate dettato';
+            }
+            if ($diffB['aggiunte'] > 0) {
+                $pezzi[] = $diffB['aggiunte'] . ' riga' . ($diffB['aggiunte'] > 1 ? 'he' : '') . ' aggiunta';
+            }
+
+            $aggiornata = getGroupMemory($groupId);
+            $out = 'Fatto: ' . implode(', ', $pezzi) . ".\n";
+            if (trim($aggiornata['corretto']) !== '') {
+                $out .= "\nQuello che mi avete dettato voi, e che non tocco piu' da solo:\n\n"
+                      . $aggiornata['corretto'];
+            }
+            return ['response' => $out];
         }
 
         // --- mostra (default) ------------------------------------------------

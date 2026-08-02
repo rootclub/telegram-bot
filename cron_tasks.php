@@ -99,6 +99,7 @@ if (PHP_SAPI !== 'cli') {
     if (!empty($_GET['task']))           { $argv[] = '--task=' . preg_replace('/[^a-z0-9_-]/i', '', (string)$_GET['task']); }
     if (!empty($_GET['force']))          { $argv[] = '--force'; }
     if (!empty($_GET['reset_group_memory'])) { $argv[] = '--reset-group-memory'; }
+    if (!empty($_GET['clear_corretto']))     { $argv[] = '--clear-corretto'; }
 }
 
 foreach (array_slice($argv ?? [], 1) as $arg) {
@@ -111,6 +112,16 @@ foreach (array_slice($argv ?? [], 1) as $arg) {
         $db->exec("UPDATE memoria_gruppo SET osservato = '', last_processed_id = 0");
         logLine('group_memory', 'RESET: appunti osservati e cursore azzerati (blocco corretto intatto)');
         echo "appunti osservati azzerati, blocco corretto intatto\n";
+        exit(0);
+    } elseif ($arg === '--clear-corretto') {
+        // Manutenzione: svuota il blocco dettato dagli amministratori. Serve quando
+        // ci finisce dentro spazzatura — e' successo al primo utilizzo reale, quando
+        // la correzione riscriveva il blocco per intero invece di applicare un diff.
+        // La versione precedente resta nello storico.
+        global $db;
+        $g = defined('MAIN_GROUP_ID') ? (int)MAIN_GROUP_ID : 0;
+        saveGroupMemoryBlock($g, 'corretto', '', 'manutenzione');
+        echo "blocco corretto svuotato (la versione precedente resta nello storico)\n";
         exit(0);
     } elseif ($arg === '--list') {
         foreach ($TASKS as $nome => $t) {

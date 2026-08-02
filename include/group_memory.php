@@ -359,9 +359,13 @@ PROMPT;
  *
  * @param array $attuali righe gia' presenti
  * @param array $parsed  JSON del modello: {"aggiungi": [...], "rimuovi": [n,...]}
+ * @param bool  $consentiSvuotamento true solo quando la richiesta viene da una
+ *              persona: "cancella tutto" detto da un amministratore e' un ordine
+ *              legittimo e reversibile dallo storico, mentre lo stesso dal cron
+ *              sarebbe un modello che ha perso la bussola.
  * @return array{righe: string[], aggiunte: int, rimosse: int, note: string[]}
  */
-function applyGroupMemoryDiff(array $attuali, array $parsed): array {
+function applyGroupMemoryDiff(array $attuali, array $parsed, bool $consentiSvuotamento = false): array {
     $note = [];
 
     // Le rimozioni si applicano per indice, quindi vanno risolte PRIMA di aggiungere,
@@ -381,7 +385,7 @@ function applyGroupMemoryDiff(array $attuali, array $parsed): array {
 
     // Non si svuota mai tutto in un colpo: un modello che sbanda potrebbe chiedere
     // di cancellare l'intero elenco, e ce ne accorgeremmo solo dai messaggi del bot.
-    if ($attuali !== [] && count($daRimuovere) >= count($attuali)) {
+    if (!$consentiSvuotamento && $attuali !== [] && count($daRimuovere) >= count($attuali)) {
         $note[] = 'richiesta la rimozione di TUTTE le righe: ignorata in blocco';
         $daRimuovere = [];
     }
