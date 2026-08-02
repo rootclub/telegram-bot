@@ -1214,7 +1214,7 @@ PROMPT;
 //
 //   1. contesto     ultimi N messaggi (utenti + rootbot) + profili memoria
 //   2. aggancio     LLM light: c'è un fatto verificabile non ancora detto?
-//   3. verifica     Wikipedia. Niente riscontro -> fallback Hacker News
+//   3. verifica     Wikipedia, saltando le voci già usate. Niente riscontro -> fallback Hacker News
 //   4. generazione  LLM full: si inserisce nel dialogo portando l'informazione
 //   5. giudizio     LLM full indipendente: utile, congruo, supportato? altrimenti scarta
 //
@@ -1225,6 +1225,15 @@ if (!defined('DJ_CONTEXT_MESSAGES'))    define('DJ_CONTEXT_MESSAGES', 40);   // 
 if (!defined('DJ_PROFILE_MAX_CHARS'))   define('DJ_PROFILE_MAX_CHARS', 400); // troncamento profilo per utente
 if (!defined('DJ_HN_MIN_HOURS'))        define('DJ_HN_MIN_HOURS', 8);        // tetto: max un post HN ogni N ore
 if (!defined('DJ_HN_QUIET_MINUTES'))    define('DJ_HN_QUIET_MINUTES', 45);   // silenzio richiesto per cambiare argomento con una notizia
+
+// Memoria delle voci Wikipedia già usate. Il ramo HN aveva il suo dedup (hn_posted)
+// dal primo giorno, il ramo wiki no: il 2 agosto il DJ ha postato la stessa voce
+// (Semiotica) alle 02:34 e alle 12:46, con il proprio messaggio precedente ancora
+// dentro il contesto. L'unica guardia esistente vincolava le prime tre parole
+// (dj_incipits), quindi il modello ha cambiato l'attacco e ripetuto il contenuto.
+// Finestra lunga perché il gruppo può restare sullo stesso tema per giorni.
+if (!defined('DJ_WIKI_TERMS_KEEP'))      define('DJ_WIKI_TERMS_KEEP', 15);    // quante voci ricordare
+if (!defined('DJ_WIKI_TERMS_DAYS'))      define('DJ_WIKI_TERMS_DAYS', 7);     // per quanti giorni valgono
 
 // Finestra di contesto per gli stadi del DJ. Il default di Ollama è 4096 token e
 // i prompt del DJ ne fanno ~8500 (misurato: 27080 caratteri con 40 messaggi veri e
@@ -1293,8 +1302,10 @@ function _djParseJson(string $raw): ?array {
 /**
  * Contesto recente per il DJ: ultimi $limit messaggi del gruppo a prescindere
  * dall'ora, così il filo del discorso non si spezza sul confine dei 60 minuti.
- * Include i turni di 'rootbot' (il dispatcher li salva in contesto_chat), così
- * il bot vede anche cosa ha già detto e non si ripete.
+ * Include i turni di 'rootbot' (il dispatcher li salva in contesto_chat), così il
+ * bot vede anche cosa ha già detto. Vederlo però non basta a non ripetersi: il 2
+ * agosto ha ripostato la stessa voce Wikipedia con il proprio messaggio precedente
+ * ancora nel contesto. Contro la ripetizione vale dj_wiki_terms, non questa lista.
  *
  * @return array ['text' => string, 'user_ids' => int[], 'count' => int]
  */
@@ -1401,9 +1412,38 @@ function buildDJUserProfiles(array $userIds, int $maxPerUser = DJ_PROFILE_MAX_CH
  *
  * @return array|null ['argomenti' => string[], 'c_e_materia' => bool, 'search_term' => string, 'cosa_aggiungere' => string]
  */
-function _djFindFactualHook(string $context, string $profiles): ?array {
+function _djFindFactualHook(string $context, string $profiles, array $usedTerms = []): ?array {
     $djLog = logPath('dj_debug');
     $profileBlock = $profiles !== '' ? "\n\n### CHI STA PARLANDO ###\n{$profiles}" : '';
+
+    // Le voci già usate vanno date al modello, non solo controllate a valle: se le
+    // scartassimo soltanto dopo, su un gruppo che resta sullo stesso tema per giorni
+    // il DJ tacerebbe invece di cercare un aggancio diverso sulla stessa conversazione.
+    $avoidBlock = '';
+    if ($usedTerms !== []) {
+        // I termini nascono da un LLM che ha letto messaggi degli utenti, quindi
+        // rientrano dalla porta di servizio nel prompt successivo: stesso trattamento
+        // del resto del testo iniettato. Il taglio a 80 char è contro un search_term
+        // degenere che gonfierebbe il prompt: un titolo di voce non è mai così lungo.
+        require_once __DIR__ . '/user_memory.php';
+        $puliti = [];
+        foreach ($usedTerms as $r) {
+            $t = mb_substr(sanitizeMessageForPrompt($r['term']), 0, 80);
+            if ($t !== '') {
+                $puliti[] = $t;
+            }
+        }
+        // Se non resta niente di leggibile si va avanti senza il blocco: il controllo
+        // vero è comunque a valle, in _dj(), che confronta i termini grezzi.
+        if ($puliti !== []) {
+            $lista = implode(', ', $puliti);
+            $avoidBlock = "\n\n### VOCI GIÀ USATE ###\n"
+                . "Di queste hai già parlato nei giorni scorsi: {$lista}.\n"
+                . "Non riproporle. Se il fatto che ti viene in mente sta in una di quelle voci, "
+                . "cercane un altro in una voce diversa: la stessa conversazione può reggere agganci diversi. "
+                . "Se non ne trovi nessuno, c_e_materia è false.";
+        }
+    }
 
     $prompt = <<<PROMPT
 Compila un oggetto JSON che dice se in questa conversazione di gruppo manca UN'INFORMAZIONE FATTUALE VERIFICABILE che nessuno ha ancora detto e che renderebbe la discussione più ricca.
@@ -1424,7 +1464,7 @@ Il fatto deve essere NON OVVIO: se chi sta parlando di quell'argomento quasi cer
 Metti c_e_materia = false anche quando la conversazione è fatta di chiacchiere, battute, organizzazione pratica (orari, chi porta cosa), umori personali, o quando l'argomento è già stato esaurito da chi parla. Sii severo: nel dubbio, false.
 
 ### CONVERSAZIONE ###
-{$context}{$profileBlock}
+{$context}{$profileBlock}{$avoidBlock}
 
 ### RICORDA ###
 Output ammesso: solo l'oggetto JSON con i campi argomenti, c_e_materia, search_term, cosa_aggiungere. Niente analisi, niente riassunti, niente markdown.
@@ -1543,6 +1583,80 @@ PROMPT;
 }
 
 /**
+ * Voci Wikipedia già usate dal DJ e ancora dentro la finestra di validità.
+ *
+ * Equivalente per il ramo wiki di quello che hn_posted è per il ramo Hacker News.
+ * Vive in bot_state e non in una tabella perché sono una quindicina di stringhe
+ * con scadenza, non uno storico da interrogare.
+ *
+ * @return array<int, array{term: string, ts: int}> dalla più vecchia alla più recente
+ */
+function _djRecentWikiTerms(): array {
+    $saved = getBotState('dj_wiki_terms', []);
+    if (!is_array($saved)) {
+        return [];
+    }
+
+    $cutoff = time() - DJ_WIKI_TERMS_DAYS * 86400;
+    $out = [];
+    foreach ($saved as $row) {
+        // Righe malformate (o di un eventuale formato precedente) vengono ignorate
+        // invece di far fallire tutto: il dedup è una guardia, non un dato critico.
+        if (!is_array($row) || empty($row['term'])) {
+            continue;
+        }
+        $ts = (int)($row['ts'] ?? 0);
+        if ($ts < $cutoff) {
+            continue;
+        }
+        $out[] = ['term' => (string)$row['term'], 'ts' => $ts];
+    }
+    return $out;
+}
+
+/**
+ * Confronto fra voci: "Semiotica" e "semiotica" sono la stessa cosa.
+ *
+ * Il match resta però esatto sul titolo: "Segno (semiotica)" non viene
+ * riconosciuto come già usato. Va bene così — l'hook tende a ripetere lo stesso
+ * identico search_term, ed è quel caso che dobbiamo fermare; un confronto
+ * fuzzy rischierebbe di zittire agganci legittimi su voci solo omonime.
+ */
+function _djNormalizeTerm(string $term): string {
+    return mb_strtolower(trim($term));
+}
+
+/**
+ * Cerca una voce fra quelle già usate.
+ *
+ * @param array<int, array{term: string, ts: int}> $used
+ * @return array{term: string, ts: int}|null la riga trovata, con il suo timestamp
+ */
+function _djFindUsedWikiTerm(string $term, array $used): ?array {
+    $needle = _djNormalizeTerm($term);
+    if ($needle === '') {
+        return null;
+    }
+    foreach ($used as $row) {
+        if (_djNormalizeTerm($row['term']) === $needle) {
+            return $row;
+        }
+    }
+    return null;
+}
+
+/**
+ * Registra una voce come usata. Da chiamare SOLO alla pubblicazione: un giro
+ * scartato dal giudice non ha detto niente al gruppo, e bruciare la voce lo
+ * renderebbe irrecuperabile per una settimana.
+ */
+function _djMarkWikiTermUsed(string $term): void {
+    $used = _djRecentWikiTerms();
+    $used[] = ['term' => trim($term), 'ts' => time()];
+    setBotState('dj_wiki_terms', array_slice($used, -DJ_WIKI_TERMS_KEEP));
+}
+
+/**
  * Il DJ può ricadere su Hacker News solo se non l'ha già fatto di recente:
  * senza tetto, e con il gate Wikipedia che fallisce spesso, il bot diventerebbe
  * di fatto un feed di notizie tech invece di un partecipante alla conversazione.
@@ -1591,9 +1705,15 @@ function _dj($chatID, $hoursAgo = 0, $explain = false) {
     }
 
     // --- STADIO 2: aggancio fattuale nel dialogo -------------------------------
+    $usedWikiTerms = _djRecentWikiTerms();
+    if ($usedWikiTerms !== []) {
+        file_put_contents($djLog, "Voci wiki già usate: "
+            . implode(', ', array_map(fn(array $r): string => $r['term'], $usedWikiTerms)) . "\n", FILE_APPEND);
+    }
+
     $hook = null;
     if ($context['count'] >= 3) {
-        $hook = _djFindFactualHook($context['text'], $profiles);
+        $hook = _djFindFactualHook($context['text'], $profiles, $usedWikiTerms);
     } else {
         file_put_contents($djLog, "Troppo pochi messaggi per cercare un aggancio\n", FILE_APPEND);
     }
@@ -1606,14 +1726,29 @@ function _dj($chatID, $hoursAgo = 0, $explain = false) {
     $hnStory = null;
     $hnRelated = false;
 
+    $termGiaUsato = null;  // riga di dj_wiki_terms se l'hook ha ripescato una voce vecchia
+
     if ($hook && $hook['c_e_materia'] && $hook['search_term'] !== '') {
-        $wiki = getWikipediaContext($hook['search_term']);
-        if ($wiki) {
-            $source = $wiki;
-            $sourceKind = 'wiki';
-            file_put_contents($djLog, "WIKI: verificato '{$hook['search_term']}'\n", FILE_APPEND);
+        // Il controllo sta PRIMA di Wikipedia: se la voce è già stata usata la
+        // chiamata è sprecata comunque, e scartare a valle (nel giudice) sarebbe
+        // più debole perché il giudice non sa cosa è stato pubblicato ieri.
+        $termGiaUsato = _djFindUsedWikiTerm($hook['search_term'], $usedWikiTerms);
+
+        if ($termGiaUsato) {
+            file_put_contents($djLog, sprintf(
+                "WIKI: '%s' già usata il %s, scartata\n",
+                $hook['search_term'],
+                date('d/m alle H:i', $termGiaUsato['ts'])
+            ), FILE_APPEND);
         } else {
-            file_put_contents($djLog, "WIKI: nessun riscontro per '{$hook['search_term']}'\n", FILE_APPEND);
+            $wiki = getWikipediaContext($hook['search_term']);
+            if ($wiki) {
+                $source = $wiki;
+                $sourceKind = 'wiki';
+                file_put_contents($djLog, "WIKI: verificato '{$hook['search_term']}'\n", FILE_APPEND);
+            } else {
+                file_put_contents($djLog, "WIKI: nessun riscontro per '{$hook['search_term']}'\n", FILE_APPEND);
+            }
         }
     }
 
@@ -1623,9 +1758,16 @@ function _dj($chatID, $hoursAgo = 0, $explain = false) {
         // conversazione senza materia. Confonderli ha già nascosto un bug per due
         // giri interi, con il log che diceva "nessun fatto verificabile" mentre in
         // realtà il modello non aveva prodotto JSON.
-        $causa = $hook === null
-            ? ($context['count'] >= 3 ? 'stadio hook fallito (nessun JSON dal modello)' : 'troppo pochi messaggi')
-            : 'nessun fatto verificabile nel dialogo';
+        if ($hook === null) {
+            $causa = $context['count'] >= 3
+                ? 'stadio hook fallito (nessun JSON dal modello)'
+                : 'troppo pochi messaggi';
+        } elseif ($termGiaUsato) {
+            $causa = sprintf("la voce «%s» era già stata usata il %s",
+                $hook['search_term'], date('d/m alle H:i', $termGiaUsato['ts']));
+        } else {
+            $causa = 'nessun fatto verificabile nel dialogo';
+        }
         if (!_djCanUseHN()) {
             return $silenzio($causa . ' e fallback HN non disponibile');
         }
@@ -1805,6 +1947,13 @@ PROMPT;
     $words = preg_split('/\s+/', $response);
     $usedIncipits[] = implode(' ', array_slice($words, 0, 3));
     setBotState('dj_incipits', array_slice($usedIncipits, -3));
+
+    // Stessa logica di markHNStoryPosted() sul ramo opposto: la voce si brucia solo
+    // quando il messaggio è davvero uscito.
+    if ($sourceKind === 'wiki' && $hook && $hook['search_term'] !== '') {
+        _djMarkWikiTermUsed($hook['search_term']);
+        file_put_contents($djLog, "WIKI: '{$hook['search_term']}' segnata come usata\n", FILE_APPEND);
+    }
 
     if ($sourceKind === 'hn' && $hnStory) {
         if (!empty($hnStory['url'])) {

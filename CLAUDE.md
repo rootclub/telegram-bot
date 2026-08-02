@@ -195,7 +195,7 @@ Since the trigger is a plain regex on the user's text, the keyword must appear i
 ### Cron Jobs
 
 - **`cron_saluto.php`** — Daily evening recap at 23:50, calls `_saluto()` and sends to main group with TTS button
-- **`cron_dj.php`** — Hourly spontaneous DJ commentary, Hacker News integration, configurable probability (40%), min 2h between posts, min 3 messages in the last 6h to trigger. The dice only decide whether to *attempt*: whether anything is actually posted depends on the quality gates inside `_dj()` (verifiable Wikipedia fact, HN fallback with its own cap, final LLM judge)
+- **`cron_dj.php`** — Hourly spontaneous DJ commentary, Hacker News integration, configurable probability (80%), min 2h between posts, min 3 messages in the last 6h to trigger. The dice only decide whether to *attempt*: whether anything is actually posted depends on the quality gates inside `_dj()` (verifiable Wikipedia fact, HN fallback with its own cap, final LLM judge). Both source branches deduplicate against what has already been published: HN via the `hn_posted` table, Wikipedia via `bot_state['dj_wiki_terms']` (last 15 entry titles, 7-day window). The wiki list is both injected into the hook prompt — so the model looks for a different angle instead of falling silent — and enforced after it, before the Wikipedia lookup. Entries are burned only on actual publication, so a run rejected by the judge does not consume one
 - **`cron_rassegna.php`** — Morning press digest at 08:00, fetches from rootclub.it/news/. Considers articles from the last 48h (buffer against skipped runs); dedup via `rassegna_posted` table (URL as PK) ensures no duplicates across days
 
 ## Database Schema
