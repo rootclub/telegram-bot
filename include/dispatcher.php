@@ -244,6 +244,17 @@ function dispatchIntent(string $message, array $ctx): void {
         }
     }
 
+    // "Sta scrivendo..." prima di classificare, non dopo: la classificazione da
+    // sola prende ~7 secondi, e finora in quel tratto l'utente non vedeva niente.
+    // Gli agenti che poi chiamano un LLM con la variante WithTyping lo rinfrescano
+    // da soli; per gli altri questo e' l'unico segnale che il bot ha ricevuto il
+    // messaggio. Telegram lo fa durare ~5s, quindi non resta appeso se qualcosa
+    // va storto.
+    makeAPIRequest('sendChatAction', [
+        'chat_id' => $ctx['chatID'],
+        'action'  => 'typing',
+    ]);
+
     $classification = classifyIntent($message, $ctx['chatID'], $situationHint);
 
     $intentId = $classification['intent'];

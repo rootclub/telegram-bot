@@ -116,7 +116,7 @@ function groupMemoryTargetGroup(): int {
  *
  * @return array|null il diff grezzo del modello, o null se la chiamata fallisce
  */
-function groupMemoryPlanEdit(array $memoria, string $richiesta): ?array {
+function groupMemoryPlanEdit(array $memoria, string $richiesta, int $chatId = 0): ?array {
     $numera = function (string $testo): string {
         $righe = groupMemoryLines($testo);
         if ($righe === []) {
@@ -160,13 +160,24 @@ Rispondi SOLO con questo oggetto JSON:
 - Non toccare righe che l'amministratore non ha nominato.
 PROMPT;
 
-    $result = callOllamaChatViaQBert(
-        OLLAMA_MODEL,
-        $prompt,
-        ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.1, 'num_ctx' => AI_NUM_CTX]),
-        false,
-        QBertClient::PRIORITY_NORMAL
-    );
+    // Variante con typing: pianificare la modifica richiede una decina di secondi,
+    // e senza segnale l'utente non sa se il bot lo abbia sentito.
+    $result = $chatId !== 0
+        ? callOllamaChatViaQBertWithTyping(
+            OLLAMA_MODEL,
+            $prompt,
+            $chatId,
+            ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.1, 'num_ctx' => AI_NUM_CTX]),
+            false,
+            QBertClient::PRIORITY_NORMAL
+        )
+        : callOllamaChatViaQBert(
+            OLLAMA_MODEL,
+            $prompt,
+            ollamaOptions(OLLAMA_MODEL_GPU, ['temperature' => 0.1, 'num_ctx' => AI_NUM_CTX]),
+            false,
+            QBertClient::PRIORITY_NORMAL
+        );
 
     if (!$result) {
         return null;
@@ -237,7 +248,7 @@ return [
 
         // --- modifica --------------------------------------------------------
         if ($azione === 'modifica' && $richiesta !== '') {
-            $piano = groupMemoryPlanEdit($memoria, $richiesta);
+            $piano = groupMemoryPlanEdit($memoria, $richiesta, (int)($ctx['chatID'] ?? 0));
             if ($piano === null) {
                 return ['response' => "Ho provato a metterci mano ma non mi ha risposto nessuno. Riprova fra poco."];
             }
