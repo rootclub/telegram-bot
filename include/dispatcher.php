@@ -136,6 +136,50 @@ PROMPT;
 }
 
 /**
+ * Riconduce un intent inventato dal modello a un agente che esiste davvero.
+ *
+ * Il classificatore ogni tanto non sceglie fra le voci che gli abbiamo dato: ne
+ * conia una a partire dal nome di un agente reale. Caso visto in produzione, con
+ * una correzione dell'amministratore andata persa:
+ *   {"intent": "group_memory_update", "updates": [...]}
+ * `group_memory_update` non esiste, il parse falliva e la richiesta finiva
+ * nell'agente di default — cioe' il bot rispondeva in chiacchiera a un ordine.
+ *
+ * Ricondurre e' lecito solo se il candidato e' UNO. Con "image" si finirebbe a
+ * indovinare fra image_gen e image_query, e sbagliare agente in silenzio e' peggio
+ * del fallback: in quel caso si lascia perdere e decide il default.
+ *
+ * @param string   $intent Nome proposto dal modello
+ * @param string[] $ids    Id degli agenti installati
+ * @return string|null     Id risolto, oppure null se nessuno o piu' d'uno
+ */
+function resolveIntentName(string $intent, array $ids): ?string {
+    $norm = static function (string $s): string {
+        $s = mb_strtolower(trim($s));
+        $s = preg_replace('/[^a-z0-9]+/u', '_', $s) ?? '';
+        return trim($s, '_');
+    };
+
+    $n = $norm($intent);
+    if ($n === '') {
+        return null;
+    }
+
+    $trovati = [];
+    foreach ($ids as $id) {
+        $ni = $norm((string)$id);
+        if ($ni === '') {
+            continue;
+        }
+        if ($ni === $n || str_starts_with($n, $ni . '_') || str_starts_with($ni, $n . '_')) {
+            $trovati[] = (string)$id;
+        }
+    }
+
+    return count($trovati) === 1 ? $trovati[0] : null;
+}
+
+/**
  * Classifica l'intento del messaggio tramite LLM leggero
  * Ritorna ['intent' => string, 'params' => array]
  */
@@ -177,7 +221,21 @@ function classifyIntent(string $message, int $chatID = 0, string $situationHint 
 
     if (preg_match('/\{.*\}/s', $llmResponse, $matches)) {
         $parsed = json_decode($matches[0], true);
-        if ($parsed && isset($parsed['intent']) && isset($registry['agents'][$parsed['intent']])) {
+        $intent = null;
+        $risolto = false;
+        if ($parsed && isset($parsed['intent']) && is_string($parsed['intent'])) {
+            $intent = $parsed['intent'];
+            if (!isset($registry['agents'][$intent])) {
+                $vicino = resolveIntentName($intent, array_keys($registry['agents']));
+                if ($vicino !== null) {
+                    $intent  = $vicino;
+                    $risolto = true;
+                } else {
+                    $intent = null;
+                }
+            }
+        }
+        if ($intent !== null) {
             $params = $parsed['params'] ?? [];
             if (!is_array($params)) {
                 $params = [];
@@ -200,9 +258,12 @@ function classifyIntent(string $message, int $chatID = 0, string $situationHint 
                 }
             }
 
-            $logEntry .= "RESULT: intent={$parsed['intent']}";
+            $logEntry .= "RESULT: intent={$intent}";
             if (!empty($params)) {
                 $logEntry .= ", params=" . json_encode($params, JSON_UNESCAPED_UNICODE);
+            }
+            if ($risolto) {
+                $logEntry .= " (inventato '{$parsed['intent']}', ricondotto a '{$intent}')";
             }
             if ($appiattiti) {
                 $logEntry .= " (appiattiti al primo livello, recuperati)";
@@ -211,7 +272,7 @@ function classifyIntent(string $message, int $chatID = 0, string $situationHint 
             file_put_contents($logFile, $logEntry . "\n", FILE_APPEND);
 
             return [
-                'intent' => $parsed['intent'],
+                'intent' => $intent,
                 'params' => $params,
             ];
         }

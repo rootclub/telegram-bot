@@ -36,6 +36,12 @@ if (!defined('GROUP_MEMORY_KEEP_VERSIONS'))define('GROUP_MEMORY_KEEP_VERSIONS', 
 // Sotto il tetto di proposito: compattare quando si e' gia' pieni vorrebbe dire
 // perdere righe buone prima di aver tolto quelle inutili.
 if (!defined('GROUP_MEMORY_COMPACT_AT'))   define('GROUP_MEMORY_COMPACT_AT', 1500);
+// Guadagno minimo perche' valga la pena applicare una compattazione. Una riscrittura
+// integrale mette in gioco l'integrita' di tutto il testo: se in cambio si risparmia
+// il 7% non e' un affare. Numero non arbitrario: nel primo caso reale di corruzione
+// la compattazione fece 1930 -> 1785 caratteri (7,5%) e in cambio scrisse
+// "veneriglio" al posto di "venerdi'". Con questa soglia sarebbe stata scartata.
+if (!defined('GROUP_MEMORY_COMPACT_MIN_GAIN')) define('GROUP_MEMORY_COMPACT_MIN_GAIN', 0.15);
 
 /** Spezza un blocco nelle sue righe, scartando i vuoti. */
 function groupMemoryLines(string $testo): array {
@@ -443,6 +449,75 @@ function applyGroupMemoryDiff(array $attuali, array $parsed, bool $consentiSvuot
 }
 
 /**
+ * Spezza un testo in parole, ripulite dalla punteggiatura ai bordi.
+ *
+ * @return string[]
+ */
+function groupMemoryTokens(string $t): array {
+    $out = [];
+    foreach (preg_split('/\s+/u', $t, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $p) {
+        // Solo ai bordi: i punti interni di "rootcamp.rootclub.it" servono a
+        // distinguerlo, quelli di fine frase no.
+        $p = trim($p, ".,;:!?()[]{}\"'«»…-–—");
+        if ($p !== '') {
+            $out[] = $p;
+        }
+    }
+    return $out;
+}
+
+/**
+ * I token che vanno ricopiati identici: nomi propri tecnici, indirizzi, handle,
+ * sigle con cifre. Riconosciuti dalla forma, non da una lista: underscore o punto
+ * interno, chiocciola, una cifra, o una maiuscola dopo la prima lettera
+ * (GL.iNet, M5Stack, ESP32, root_camp_fratta, @thefox71, rootcamp.rootclub.it).
+ *
+ * Le parole con la sola iniziale maiuscola restano fuori di proposito: a inizio
+ * riga ce n'e' una sempre, e finirebbero per bloccare ogni compattazione.
+ *
+ * @return string[] senza duplicati
+ */
+function groupMemoryNotableTokens(string $t): array {
+    $out = [];
+    foreach (groupMemoryTokens($t) as $p) {
+        if (mb_strlen($p) < 3) {
+            continue;
+        }
+        $notevole = str_contains($p, '@')
+            || str_contains($p, '_')
+            || preg_match('/\w\.\w/u', $p)
+            || preg_match('/\d/u', $p)
+            || preg_match('/^.\S*\p{Lu}/u', $p);
+        if ($notevole) {
+            $out[$p] = true;
+        }
+    }
+    return array_keys($out);
+}
+
+/**
+ * Le parole dell'output che nell'input non c'erano, in nessuna forma. Serve solo a
+ * lasciare traccia nel log: qui dentro finiscono sia le riformulazioni legittime
+ * sia le corruzioni, e distinguerle a codice non e' possibile.
+ *
+ * @return string[]
+ */
+function groupMemoryNewWords(string $prima, string $dopo): array {
+    $set = [];
+    foreach (groupMemoryTokens($prima) as $p) {
+        $set[mb_strtolower($p)] = true;
+    }
+    $out = [];
+    foreach (groupMemoryTokens($dopo) as $p) {
+        $k = mb_strtolower($p);
+        if (mb_strlen($k) >= 5 && !isset($set[$k])) {
+            $out[$k] = true;
+        }
+    }
+    return array_keys($out);
+}
+
+/**
  * Riscrive gli appunti in forma piu' densa: via l'episodico, via i doppioni,
  * via i riempitivi.
  *
@@ -512,10 +587,35 @@ PROMPT;
 
     // Una compattazione che raddoppia il testo non ha compattato: ha riscritto, il
     // che e' il modo in cui questa operazione puo' fare danno. Meglio non applicarla.
-    if (mb_strlen($nuovo) >= mb_strlen($osservato)) {
-        logLine('group_memory', sprintf('compattazione scartata: da %d a %d caratteri, non ha compattato',
-            mb_strlen($osservato), mb_strlen($nuovo)));
+    // La soglia non e' "un carattere in meno" ma un guadagno vero: vedi il commento
+    // su GROUP_MEMORY_COMPACT_MIN_GAIN, e' la guardia che avrebbe evitato "veneriglio".
+    $prima     = mb_strlen($osservato);
+    $dopo      = mb_strlen($nuovo);
+    $guadagno  = $prima > 0 ? ($prima - $dopo) / $prima : 0.0;
+    if ($guadagno < GROUP_MEMORY_COMPACT_MIN_GAIN) {
+        logLine('group_memory', sprintf('compattazione scartata: da %d a %d caratteri (%.1f%%), sotto il %.0f%% minimo: ha riscritto, non compattato',
+            $prima, $dopo, $guadagno * 100, GROUP_MEMORY_COMPACT_MIN_GAIN * 100));
         return null;
+    }
+
+    // Un token "notevole" (nomi con underscore, indirizzi, handle, sigle con cifre)
+    // puo' sparire — buttare righe e' lo scopo — ma non puo' comparire in una forma
+    // che nell'originale non c'era: quella e' la firma della corruzione, non della
+    // sintesi. E' il caso root_camp_fratta -> root_camp_francia.
+    $inventati = array_diff(groupMemoryNotableTokens($nuovo), groupMemoryNotableTokens($osservato));
+    if ($inventati !== []) {
+        logLine('group_memory', 'compattazione scartata: nomi propri alterati -> ' . implode(', ', $inventati));
+        return null;
+    }
+
+    // Le parole comuni non si possono vincolare cosi': la sintesi le riflette
+    // legittimamente ("iscrizione" -> "iscrizioni"). Pero' e' fra queste che si
+    // nasconde la corruzione silenziosa, quindi almeno vanno messe agli atti: senza
+    // questa riga "venerdi'" -> "veneriglio" si scopre solo rileggendo il blocco a mano.
+    $nuoveParole = groupMemoryNewWords($osservato, $nuovo);
+    if ($nuoveParole !== []) {
+        logLine('group_memory', 'compattazione, parole non presenti nell\'originale (da controllare): '
+            . implode(', ', array_slice($nuoveParole, 0, 20)));
     }
 
     // Sfoltire e' lo scopo; svuotare no. Sotto un terzo delle righe si sospetta
