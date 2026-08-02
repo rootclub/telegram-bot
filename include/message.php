@@ -154,14 +154,18 @@ function processMessage($message) {
         }
     }
 
+    // /stats e la classifica delle imprecazioni sono stati rimossi: il conteggio
+    // stava su un match per sottostringa che sbagliava di continuo, e la versione
+    // via LLM, provata sui messaggi veri del gruppo, proponeva come parolacce
+    // "lavoro", "non", "civile" e "gay". Per una classifica che mette in fila
+    // persone vere quella precisione non basta, e portarla al livello richiesto
+    // significava una coda di approvazione dei termini da curare a mano: troppo
+    // lavoro per una goliardata.
     //$profanity_response = handle_profanity($message);
     $profanity_response = null;
     if ($profanity_response !== null) {
         $response = $profanity_response;
-        
-    } elseif ($text == '/stats' || $text == '/stats@rootbotbot') {
-        $response = getProfanityStats();
-        
+
     } elseif (is_porto_al_root($text)) {
         $response = handle_porto_al_root($message);
         

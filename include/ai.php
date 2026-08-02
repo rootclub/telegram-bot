@@ -1288,8 +1288,11 @@ function _djCleanProfileText(?string $text): string {
 
 /**
  * Estrae il primo oggetto JSON da una risposta LLM (stesso pattern del dispatcher).
+ *
+ * Non è specifico del DJ: serve ovunque si chieda JSON a un modello, cosa che va
+ * fatta a parole perché QBert non inoltra il campo `format` di Ollama.
  */
-function _djParseJson(string $raw): ?array {
+function extractJsonObject(string $raw): ?array {
     if (preg_match('/\{.*\}/s', $raw, $m)) {
         $parsed = json_decode($m[0], true);
         if (is_array($parsed)) {
@@ -1490,7 +1493,7 @@ PROMPT;
     logPromptBudget($djLog, 'HOOK', $prompt, $result);
 
     $raw = trim(stripThinkingTags($result['response'] ?? ''));
-    $parsed = _djParseJson($raw);
+    $parsed = extractJsonObject($raw);
 
     if (!$parsed) {
         file_put_contents($djLog, "HOOK: parse fallito, raw=" . substr($raw, 0, 300) . "\n", FILE_APPEND);
@@ -1567,7 +1570,7 @@ PROMPT;
     }
 
     $raw = trim(stripThinkingTags($result['response'] ?? ''));
-    $parsed = _djParseJson($raw);
+    $parsed = extractJsonObject($raw);
 
     if (!$parsed) {
         file_put_contents($djLog, "JUDGE: parse fallito -> scarto. raw=" . substr($raw, 0, 300) . "\n", FILE_APPEND);

@@ -11,7 +11,6 @@ This is a PHP-based Telegram bot that handles group chat interactions with vario
 - Quiz/trivia system with Wikipedia integration
 - Event management with multi-step workflows
 - TTS (Text-to-Speech) via voice clone
-- Profanity moderation
 - Context-aware conversation capabilities
 - User profiling/memory system
 - Automated cron tasks: daily recap, DJ/news, press digest
@@ -34,7 +33,7 @@ This is a PHP-based Telegram bot that handles group chat interactions with vario
 - `message.php`: Message processing, command routing (elseif chain), `sendPrivateResponse()`
 - `orders.php`: Food ordering system ("pappatoie") management
 - `events.php`: Event creation, participation, multi-step workflows (`handleEventInput()`)
-- `moderation.php`: Profanity detection and user moderation
+- `moderation.php`: On-demand silence, link shaming (X/Facebook) and the "porto al root" flow. Does **not** reprimand anyone for swearing and keeps no statistics — the word lists, blasphemy patterns and `$lecit_words` whitelist were removed, along with `/stats`. Still disabled at `message.php:157`
 - `image.php`: Image download and storage handling
 - `help.php`: Help command responses
 - `user_memory.php`: User profile memory system (extractors, aggregators)
@@ -195,8 +194,9 @@ Since the trigger is a plain regex on the user's text, the keyword must appear i
 ### Cron Jobs
 
 - **`cron_saluto.php`** — Daily evening recap at 23:50, calls `_saluto()` and sends to main group with TTS button
-- **`cron_dj.php`** — Hourly spontaneous DJ commentary, Hacker News integration, configurable probability (80%), min 2h between posts, min 3 messages in the last 6h to trigger. The dice only decide whether to *attempt*: whether anything is actually posted depends on the quality gates inside `_dj()` (verifiable Wikipedia fact, HN fallback with its own cap, final LLM judge). Both source branches deduplicate against what has already been published: HN via the `hn_posted` table, Wikipedia via `bot_state['dj_wiki_terms']` (last 15 entry titles, 7-day window). The wiki list is both injected into the hook prompt — so the model looks for a different angle instead of falling silent — and enforced after it, before the Wikipedia lookup. Entries are burned only on actual publication, so a run rejected by the judge does not consume one
+- **`cron_dj.php`** — Spontaneous DJ commentary. **Runs every 15 minutes**, not hourly (measured: median gap of 14.9 min between runs, plus the script's own `sleep(rand(0,300))` jitter), Hacker News integration, configurable probability (80%), min 2h between posts, min 3 messages in the last 6h to trigger. The dice only decide whether to *attempt*: whether anything is actually posted depends on the quality gates inside `_dj()` (verifiable Wikipedia fact, HN fallback with its own cap, final LLM judge). Both source branches deduplicate against what has already been published: HN via the `hn_posted` table, Wikipedia via `bot_state['dj_wiki_terms']` (last 15 entry titles, 7-day window). The wiki list is both injected into the hook prompt — so the model looks for a different angle instead of falling silent — and enforced after it, before the Wikipedia lookup. Entries are burned only on actual publication, so a run rejected by the judge does not consume one
 - **`cron_rassegna.php`** — Morning press digest at 08:00, fetches from rootclub.it/news/. Considers articles from the last 48h (buffer against skipped runs); dedup via `rassegna_posted` table (URL as PK) ensures no duplicates across days
+- **`cron_tasks.php`** — Generic scheduler for batch jobs, every 15 minutes. Currently holds **no tasks** — it is the infrastructure, kept for the next batch job. Holds a `$TASKS` registry (`descrizione`, `ogni` = minimum seconds between runs, `run` = callable); last-run timestamps live in `bot_state` under `task_last_{name}`. Own lock in `/tmp/rootbot_tasks.lock`, released after `TASKS_TICK_BUDGET` (600s) if a run dies. Tasks that don't start because the tick budget ran out are logged explicitly, so a backlog that never shrinks doesn't look like a backlog that was already empty. CLI: `--list`, `--task=name`, `--force`. Every task runs at `PRIORITY_LAZY` — that, not a scheduling trick, is how GPU contention is handled. Deliberately *not* grafted onto `cron_dj.php`'s early-exit branches: that would couple unrelated features through the DJ's lock and its posting cadence
 
 ## Database Schema
 
@@ -217,8 +217,7 @@ Since the trigger is a plain regex on the user's text, the keyword must appear i
 5. **contesto_chat** - Message context for AI
    - `id`, `group_id`, `user_name`, `message_text`, `timestamp`, `user_id`
 
-6. **profanity_stats** - User profanity tracking
-   - `user_id` (PK), `user_name`, `lieve`, `moderata`, `grave`, `bestemmia`, `last_updated`
+6. **profanity_stats** — *unused*. Nothing writes to it and nothing reads it: the counting feature was removed (see "Removed features"). The table is left in place, harmless
 
 7. **bot_silence** - Bot silence management
    - `id` (always 1), `silence_until`
@@ -316,7 +315,12 @@ Canali attivi:
 - `logs/memory.log` — User memory extraction diagnostics
 - `logs/memory_cron.log` — Nightly user-memory cron job
 - `logs/quiz.log` — Quiz generation pipeline
+- `logs/tasks.log` — `cron_tasks.php` scheduler: what ran, what was skipped and why
 - `logs/telegram.log` — Telegram API wrapper (retry, errors)
+
+### Removed features
+
+- **Profanity leaderboard (`/stats`)** — removed 2026-08-02. Counting ran on `strpos()` without word boundaries, so "figa" fired inside "figata" and "cazzo" inside "cazzotto"; the blasphemy branch and its `$lecit_words` whitelist had already been commented out, and the call site at `message.php:157` was disabled, so nothing had been counted for a long time. An LLM classifier was built and measured against the group's real messages: it scored well on a clean synthetic set (0 false positives) but on real, messy chat it proposed "lavoro", "non", "civile", "signora" and "gay" as profanity. A leaderboard ranks real people, so the precision bar is high; reaching it meant a manual term-approval queue — too much upkeep for a joke feature. `profanity_stats` remains in the DB, unused and unwritten. The immediate reprimands were removed on their own merits: telling someone off for how they talk isn't funny in a group of friends.
 
 ### Utility Scripts
 - `admin_user_memory.php` — Web interface for user memory management (protected by `MEMORY_ADMIN_TOKEN`)

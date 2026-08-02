@@ -5,20 +5,14 @@
 
 require_once __DIR__ . '/QBertClient.php';
 
-// Lista di parolacce e loro categorie (utilizzando placeholder per termini più espliciti)
-$profanity_list = [
-    'lieve' => [
-        'cavolo', 'cacchio', 'accidenti', 'mannaggia', 'diamine', 'perbacco',
-        'cribbio', 'perdinci', 'perdiana', 'accipicchia', 'caspita'
-    ],
-    'moderata' => [
-        'cazzo', 'merda', 'figa', 'p***e', 'v*****a', 'b***a',
-        'f*****o', 'inc***o', 'sc**o', 'put***a'
-    ],
-    'grave' => [
-        'fanculo', 'vaffanculo', 'stronzo', 'testa di cazzo', 'figlio di puttana', 'rottinculo', 'frocio', 'finocchio', 'troia', 'puttana',
-        'battona', 'succhiacazzi', 'pompinara', 'pezzo di merda', 'testa di minchia', 'faccia di cazzo', 'faccia di culo', 'aranzulla'
-    ],
+// Qui restano solo i link da sfottere: match esatto su URL, non riguarda le persone.
+//
+// L'elenco di parolacce, i pattern per le bestemmie e la whitelist di parole lecite
+// (addio, stadio, radio...) sono stati rimossi. Sbagliavano per costruzione — strpos()
+// senza confini di parola faceva scattare "figa" dentro "figata" e "cazzo" dentro
+// "cazzotto" — ma soprattutto servivano a rimproverare chi scriveva parolacce, e il
+// bot non lo fa piu'.
+$link_shaming = [
     'x' => [
         'https://x.com', 'https://www.x.com'
     ],
@@ -27,53 +21,19 @@ $profanity_list = [
     ]
 ];
 
-// Pattern per rilevare potenziali bestemmie
-$blasphemy_patterns = [
-    '/\bdio\s*[a-z]+/i',
-    '/[a-z]+\s*dio\b/i',
-    '/\bgesu\s*[a-z]+/i',
-    '/[a-z]+\s*gesu\b/i',
-    '/\bmadonna\s*[a-z]+/i',
-    '/[a-z]+\s*madonna\b/i'
-];
-
-$lecit_words = ['addio', 'antidio', 'audio', 'avvedio', 'cardio', 'compendio', 'custodio', 'epicardio', 'fastidio', 'gaudio', 'eccidio', 'incudio', 'interdio', 'iridio', 'meridio', 'miocardio', 'oddio', 'odio',
-	'palladio', 'pericardio', 'pendio', 'podio', 'presidio', 'radio', 'repudio', 'rhodio', 'rodio', 'ripudio', 'rubidio', 'scandio', 'siddio', 'stipendio' , 'studio', 'stadio', 'sussidio', 'tedio', 'vannadio', 'vanadio'];
-
-// Pool di risposte per categoria
+// Battute sui link. Le risposte per lieve/moderata/grave/bestemmia sono state
+// tolte: erano rimproveri rivolti a una persona per come parla, e in un gruppo di
+// amici non sono simpatici.
 $responses = [
-    'lieve' => [
-        "Ehi, {user}! Anche 'per tutti i bit!' può essere efficace, sai?",
-        "Wow {user}, stai calmo! Hai provato con 'santo transistor!'?",
-        "{user}, sei così vicino all'essere un hacker con un vocabolario PG!"
-    ],
-    'moderata' => [
-        "Attenzione {user}, il tuo firewall anti-parolacce sembra bucato!",
-        "{user}, hai appena triggato l'IDS (Imprecation Detection System)!",
-        "Codice errore 418: {user} è una teiera dal linguaggio colorito"
-    ],
-    'grave' => [
-        "{user}, con quel linguaggio potresti far crashare un server!",
-        "Allarme rosso! {user} ha appena eseguito un attacco DoS (Denial of Sobriety)!",
-        "{user}, hai appena violato il protocollo di comunicazione del root!"
-    ],
     'x' => [
-        "{user}, per fortuna non ho uno stomaco perché quel link mi farebbe vomitare",
-        "Oh no! {user} ha postato un link da quella fogna che è X!",
+        "{user}, per fortuna non ho uno stomaco perche' quel link mi farebbe vomitare",
+        "Oh no! {user} ha postato un link da quella fogna che e' X!",
         "{user}, il link che hai postato puzza come una latrina di Calcutta in estate!"
     ],
     'facebook' => [
         "{user}, oh no, un altro link a quel covo di boomer",
-        "Oh no! {user} ha postato un link da quella fabbrica di boomer che è Facebook!",
+        "Oh no! {user} ha postato un link da quella fabbrica di boomer che e' Facebook!",
         "{user}, il link che hai postato puzza di vecchio..."
-    ],
-    'bestemmia' => [
-        "{user}, per tutte le schede madri! Hai appena fatto un overflow nel registro delle bestemmie!",
-        "KERNEL PANIC: {user} ha appena corrotto il file system divino!",
-        "{user}, neanche un BIOS del '99 era così instabile! Prova a fare un upgrade al tuo vocabolario.",
-        "Santo rootkit, {user}! Hai appena hackerato il firewall celeste!",
-        "Attenzione {user}, stai per causare un fork bomb nell'aldilà!",
-        "{user}, hai appena triggerato un interrupt non maskerable nell'etere cosmico!"
     ]
 ];
 
@@ -94,123 +54,39 @@ function setSilenceUntil($timestamp) {
 }
 
 
-// Funzione per rilevare e gestire le imprecazioni
+/**
+ * Silenzio a richiesta e battuta sui link.
+ *
+ * Non rimprovera piu' nessuno per come parla. Resta comunque disattivata
+ * (message.php:157); se la si riaccende, l'unica cosa che puo' fare e' commentare
+ * un link a X o Facebook.
+ */
 function handle_profanity($message) {
-    global $profanity_list, $responses, $blasphemy_patterns, $lecit_words ;
+    global $link_shaming, $responses;
 
     $text = mb_strtolower($message['text']);
-    $user_id = $message['from']['id'];
     $user_name = $message['from']['first_name'];
-    $chat_id = $message['chat']['id'];
-    
-    $silence_until = getSilenceUntil();
-    
-    if (time() < $silence_until) {
+
+    if (time() < getSilenceUntil()) {
         return null;
     }
 
     if (strpos($text, 'bot stai zitto') !== false || strpos($text, 'bot taci') !== false || strpos($text, 'bot non rompere') !== false) {
-        $new_silence_until = time() + SILENCE_DURATION;
-        setSilenceUntil($new_silence_until);
-        return "Ok, entro in modalità stealth per un po'. Ma vi tengo sempre d'occhio!";
+        setSilenceUntil(time() + SILENCE_DURATION);
+        return "Ok, entro in modalita' stealth per un po'. Ma vi tengo sempre d'occhio!";
     }
 
-    $detected_category = null;
-    foreach ($profanity_list as $category => $words) {
-        foreach ($words as $word) {
-            if (strpos($text, $word) !== false) {
-                $detected_category = $category;
-                break 2;
+    foreach ($link_shaming as $category => $urls) {
+        foreach ($urls as $url) {
+            if (strpos($text, $url) !== false) {
+                $pool = $responses[$category];
+                return str_replace('{user}', $user_name, $pool[array_rand($pool)]);
             }
         }
     }
 
-	// Controllo per bestemmie
-	/*
-	if (!$detected_category) {
-		foreach ($blasphemy_patterns as $pattern) {
-		    if (preg_match($pattern, $text, $matches)) {
-		        $potential_blasphemy = strtolower($matches[0]);
-		        $is_lecit = false;
-		        
-		        foreach ($lecit_words as $lecit_word) {
-		            if (strpos($potential_blasphemy, strtolower($lecit_word)) !== false) {
-		                $is_lecit = true;
-		                break;
-		            }
-		        }
-		        
-		        if (!$is_lecit) {
-		            $detected_category = 'bestemmia';
-		            break;
-		        }
-		    }
-		}
-	}
-	*/
-
-    if ($detected_category ) {
-        updateProfanityStats($user_id, $user_name, $detected_category);
-	if ($detected_category!="lieve" && $detected_category!="moderata"){
-		$response = $responses[$detected_category][array_rand($responses[$detected_category])];
-		$response = str_replace('{user}', $user_name, $response);
-		//if ($detected_category === 'bestemmia') {
-		//    $response .= "\nSuggerimento: prova con 'Per tutti i bit dannati!' o 'Sacro firewall!'";
-		//}
-		return $response;
-	}
-    }
-
     return null;
 }
-
-// Funzione per aggiornare le statistiche di un utente
-function updateProfanityStats($user_id, $user_name, $category) {
-    global $db;
-    $stmt = $db->prepare("INSERT INTO profanity_stats 
-        (user_id, user_name, $category, last_updated) 
-        VALUES (:user_id, :user_name, 1, CURRENT_TIMESTAMP)
-        ON CONFLICT(user_id) DO UPDATE SET
-        $category = profanity_stats.$category + 1,
-        user_name = :user_name,
-        last_updated = CURRENT_TIMESTAMP
-    ");
-    $stmt->bindValue(':user_id', $user_id, SQLITE3_INTEGER);
-    $stmt->bindValue(':user_name', $user_name, SQLITE3_TEXT);
-    $stmt->execute();
-}
-
-// Funzione per ottenere le statistiche
-function getProfanityStats() {
-    global $db;
-    $stats = [];
-    $categories = ['lieve', 'moderata', 'grave', 'bestemmia'];
-    
-    foreach ($categories as $category) {
-        $result = $db->query("SELECT user_name, $category as count 
-                              FROM profanity_stats 
-                              ORDER BY $category DESC 
-                              LIMIT 1");
-        $row = $result->fetchArray(SQLITE3_ASSOC);
-        if ($row) {
-            $stats[$category] = [
-                'user' => $row['user_name'],
-                'count' => $row['count']
-            ];
-        }
-    }
-    
-    $response = "Statistiche delle imprecazioni:\n";
-    foreach ($categories as $category) {
-        if (isset($stats[$category])) {
-            $response .= ucfirst($category) . ": " . $stats[$category]['user'] . 
-                         " con " . $stats[$category]['count'] . " occorrenze\n";
-        }
-    }
-    
-    return $response;
-}
-
 
 ///////////////////////////////////////////////////////////
 //////////////////////// PORTO AL ROOT ////////////////////
