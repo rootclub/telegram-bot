@@ -178,16 +178,41 @@ function classifyIntent(string $message, int $chatID = 0, string $situationHint 
     if (preg_match('/\{.*\}/s', $llmResponse, $matches)) {
         $parsed = json_decode($matches[0], true);
         if ($parsed && isset($parsed['intent']) && isset($registry['agents'][$parsed['intent']])) {
+            $params = $parsed['params'] ?? [];
+            if (!is_array($params)) {
+                $params = [];
+            }
+
+            // Il modello ogni tanto appiattisce i parametri al primo livello invece
+            // di annidarli sotto "params": {"intent":"x","action":"edit","detail":"..."}
+            // al posto di {"intent":"x","params":{...}}. Senza questo recupero quei
+            // campi finiscono nel nulla e l'agente si comporta come se non avesse
+            // ricevuto niente — e' successo davvero a group_memory, che ha mostrato
+            // gli appunti invece di correggerli. Il campo `format` di Ollama
+            // vincolerebbe la forma, ma QBert non lo inoltra.
+            $appiattiti = false;
+            if ($params === []) {
+                $flat = $parsed;
+                unset($flat['intent'], $flat['params']);
+                if ($flat !== []) {
+                    $params = $flat;
+                    $appiattiti = true;
+                }
+            }
+
             $logEntry .= "RESULT: intent={$parsed['intent']}";
-            if (!empty($parsed['params'])) {
-                $logEntry .= ", params=" . json_encode($parsed['params'], JSON_UNESCAPED_UNICODE);
+            if (!empty($params)) {
+                $logEntry .= ", params=" . json_encode($params, JSON_UNESCAPED_UNICODE);
+            }
+            if ($appiattiti) {
+                $logEntry .= " (appiattiti al primo livello, recuperati)";
             }
             $logEntry .= "\n";
             file_put_contents($logFile, $logEntry . "\n", FILE_APPEND);
 
             return [
                 'intent' => $parsed['intent'],
-                'params' => $parsed['params'] ?? [],
+                'params' => $params,
             ];
         }
     }

@@ -31,6 +31,65 @@ function groupMemoryUserIsAdmin(int $userId): bool {
     return isAdmin(MAIN_GROUP_ID, $userId);
 }
 
+/**
+ * Ricava azione e richiesta senza fidarsi dei nomi che il classificatore produce.
+ *
+ * Il classificatore non ha un contratto forzato (QBert non inoltra `format` a
+ * Ollama), quindi improvvisa: alla richiesta "correggi la parola espressionmente
+ * con espressione" ha risposto {"intent":"group_memory","action":"edit",
+ * "detail":"..."} invece di usare "azione"/"richiesta" dentro "params". L'agente
+ * riceveva zero parametri e mostrava gli appunti invece di correggerli.
+ *
+ * Qui i sinonimi vengono accettati, e soprattutto il testo grezzo dell'utente fa
+ * da rete: e' sempre disponibile ed e' la fonte piu' fedele di cosa e' stato
+ * chiesto, piu' della parafrasi del classificatore.
+ *
+ * @return array{azione: string, richiesta: string}
+ */
+function groupMemoryReadIntent(array $params, string $messaggio): array {
+    $primo = function (array $chiavi) use ($params): string {
+        foreach ($chiavi as $k) {
+            if (isset($params[$k]) && is_string($params[$k]) && trim($params[$k]) !== '') {
+                return trim($params[$k]);
+            }
+        }
+        return '';
+    };
+
+    $azione    = mb_strtolower($primo(['azione', 'action', 'operazione', 'op']));
+    $richiesta = $primo(['richiesta', 'detail', 'dettaglio', 'descrizione', 'testo', 'modifica', 'value']);
+
+    // Normalizzazione dei sinonimi che il modello usa al posto delle tre parole attese.
+    if (preg_match('/modif|edit|corregg|update|aggiung|togli|rimuov|cancell/u', $azione)) {
+        $azione = 'modifica';
+    } elseif (preg_match('/storic|history|version|prima/u', $azione)) {
+        $azione = 'storico';
+    } elseif (preg_match('/mostra|show|view|read|legg|dimmi/u', $azione)) {
+        $azione = 'mostra';
+    } else {
+        $azione = '';
+    }
+
+    // Ultima rete: se l'azione non si e' capita, la si deduce dal testo dell'utente.
+    if ($azione === '') {
+        if (preg_match('/\b(corregg\w*|modific\w*|aggiung\w*|togli\w*|rimuov\w*|cancell\w*|elimin\w*|sostitu\w*|cambia)\b/iu', $messaggio)) {
+            $azione = 'modifica';
+        } elseif (preg_match('/\b(prima|storic\w*|version\w*)\b/iu', $messaggio)) {
+            $azione = 'storico';
+        } else {
+            $azione = 'mostra';
+        }
+    }
+
+    // Per la modifica il testo grezzo batte la parafrasi: contiene le parole esatte
+    // (e nel caso reale la parafrasi diceva "espressioni" al posto di "espressione").
+    if ($azione === 'modifica') {
+        $richiesta = trim($messaggio) !== '' ? trim($messaggio) : $richiesta;
+    }
+
+    return ['azione' => $azione, 'richiesta' => $richiesta];
+}
+
 /** Il gruppo di riferimento: la memoria è una sola, quella del gruppo principale. */
 function groupMemoryTargetGroup(): int {
     return defined('MAIN_GROUP_ID') ? (int)MAIN_GROUP_ID : 0;
@@ -154,9 +213,12 @@ return [
             return ['response' => "Non so a quale gruppo ti riferisci: manca MAIN_GROUP_ID nella configurazione."];
         }
 
-        $azione    = mb_strtolower(trim((string)($params['azione'] ?? 'mostra')));
-        $richiesta = trim((string)($params['richiesta'] ?? ''));
+        $letto     = groupMemoryReadIntent($params, (string)($ctx['message'] ?? ''));
+        $azione    = $letto['azione'];
+        $richiesta = $letto['richiesta'];
         $memoria   = getGroupMemory($groupId);
+        logLine('group_memory', sprintf('richiesta da %s: azione=%s, params=%s',
+            $ctx['firstName'] ?? '?', $azione, json_encode($params, JSON_UNESCAPED_UNICODE)));
         $userName  = $ctx['firstName'] ?? $ctx['userName'] ?? 'admin';
 
         // --- storico ---------------------------------------------------------
