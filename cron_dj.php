@@ -3,7 +3,9 @@
  * Script per interventi casuali del DJ nel gruppo
  * Da eseguire via cron ogni ora
  *
- * Crontab: 0 * * * * /usr/bin/php /path/to/cron_dj.php
+ * Crontab: ogni 15 minuti. NON ogni ora, come diceva questa riga fino al 2026-08-02:
+ * misurato sui log, l'intervallo mediano fra due run e' di 14.9 minuti. A questo si
+ * somma lo sleep(rand(0,300)) qui sotto, che sfalsa l'orario.
  */
 
 // Rimuovi limiti di tempo

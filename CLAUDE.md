@@ -199,6 +199,20 @@ Since the trigger is a plain regex on the user's text, the keyword must appear i
 - **`cron_rassegna.php`** — Morning press digest at 08:00, fetches from rootclub.it/news/. Considers articles from the last 48h (buffer against skipped runs); dedup via `rassegna_posted` table (URL as PK) ensures no duplicates across days
 - **`cron_tasks.php`** — Generic scheduler for batch jobs, every 15 minutes. Currently runs one task: `group_memory` (hourly, see "Group Memory"). Holds a `$TASKS` registry (`descrizione`, `ogni` = minimum seconds between runs, `run` = callable); last-run timestamps live in `bot_state` under `task_last_{name}`. Own lock in `/tmp/rootbot_tasks.lock`, released after `TASKS_TICK_BUDGET` (600s) if a run dies. Tasks that don't start because the tick budget ran out are logged explicitly, so a backlog that never shrinks doesn't look like a backlog that was already empty. CLI: `--list`, `--task=name`, `--force`. Every task runs at `PRIORITY_LAZY` — that, not a scheduling trick, is how GPU contention is handled. Deliberately *not* grafted onto `cron_dj.php`'s early-exit branches: that would couple unrelated features through the DJ's lock and its posting cadence
 
+### Crontab
+
+What is actually scheduled on the server. Paths are under the deploy root; each script also states its own schedule in its docblock.
+
+| when | script |
+|---|---|
+| `0,15,30,45 * * * *` | `cron_dj.php` — every 15 min (the docblock said hourly until 2026-08-02; measured median gap is 14.9 min) |
+| `0,15,30,45 * * * *` | `cron_tasks.php` — batch scheduler |
+| `50 23 * * *` | `cron_saluto.php` |
+| `0 8 * * *` | `cron_rassegna.php` |
+| every 15 min, 00:00–06:00 | `cron_memory.php` |
+
+A missing crontab line is invisible from the code: `cron_tasks.php` existed and worked for hours while only ever being triggered by hand over HTTP. To tell the difference, look for the unconditional heartbeat each scheduler writes — `cron_tasks.php` logs `nessun task scaduto` on every tick, so a gap longer than the interval in `logs/tasks.log` means it is not actually scheduled.
+
 ## Database Schema
 
 ### Tables Overview
