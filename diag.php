@@ -15,6 +15,7 @@
  *  - tail: ultime N righe di un canale (?log=name&tail=N, max 500)
  *  - errors: righe con pattern d'errore nel canale (?log=name|all, ?since=30m)
  *  - search: righe con pattern letterale (?log=name|all, ?pattern=testo)
+ *  - lunghezze: statistiche parole domanda/risposta su tutto ai.log (taratura budget)
  *
  * Parametri comuni:
  *  - log=<channel|all>  nome canale (stesso formato di logger.php), 'all' = tutti
@@ -245,6 +246,138 @@ function diagModeChannels(): array {
     return ['ok' => true, 'channels' => logChannels()];
 }
 
+/** Percentile su array gia' ordinato. */
+function diagPerc(array $v, float $p): int {
+    if (!$v) return 0;
+    return (int)$v[(int)floor($p * (count($v) - 1))];
+}
+
+function diagStats(array $v): array {
+    if (!$v) return ['n' => 0];
+    sort($v);
+    return [
+        'n'       => count($v),
+        'min'     => $v[0],
+        'p25'     => diagPerc($v, 0.25),
+        'mediana' => diagPerc($v, 0.50),
+        'p75'     => diagPerc($v, 0.75),
+        'p90'     => diagPerc($v, 0.90),
+        'max'     => $v[count($v) - 1],
+        'media'   => round(array_sum($v) / count($v)),
+    ];
+}
+
+/**
+ * Quanto testo generava (e genera) il bot, misurato su tutto ai.log.
+ *
+ * Serve a tarare la scala di rispostaBudget(): i tetti sono stati scelti a
+ * ragionamento, non sui dati, e "sfora / non sfora" si puo' dire solo
+ * confrontandoli con quello che il modello produceva davvero. Il calcolo sta
+ * qui e non nel client perche' il log e' da ~10MB: scaricarlo per contare
+ * parole significherebbe muovere 10MB per ottenere venti numeri, e tail e'
+ * capped a 500 righe proprio per non farlo.
+ *
+ * Escono solo aggregati piu' un estratto di 60 caratteri delle domande piu'
+ * prolisse: senza un pezzo di testo i numeri non dicono se il taglio e'
+ * giusto, ma il corpo dei messaggi non ha motivo di uscire di qui.
+ *
+ * Lettura in streaming a blocchi (separatore: la riga di '=' di _ai_core), mai
+ * l'intero file in memoria — ai.log ruota a 10MB, cioe' e' sempre al limite.
+ */
+function diagModeLunghezze(): array {
+    require_once __DIR__ . '/include/ai.php';   // rispostaBudget(): una sola definizione della scala
+
+    $path = logPath('ai');
+    if (!is_file($path)) return diagFail(404, 'ai.log non trovato');
+    $fh = @fopen($path, 'r');
+    if (!$fh) return diagFail(500, 'ai.log non leggibile');
+
+    // I tetti arrivano dalla scala vera: se divergessero, questa misura
+    // certificherebbe una taratura che in produzione non esiste.
+    $tetti = array_column(rispostaBudgetScala(), 'tetto');
+    $pre = [];          // risposte pre-budget: RISPOSTA: senza conteggio
+    $post = [];         // risposte post-budget: RISPOSTA (N parole, budget livello L):
+    $perGradino = [];   // livello => [parole risposta] (solo pre)
+    $coppie = [];       // per correlazione e classifica
+    $blocchi = 0;
+
+    $conta = fn(string $s): int => count(preg_split('/\s+/u', trim($s), -1, PREG_SPLIT_NO_EMPTY));
+
+    $buf = '';
+    $processa = function (string $b) use (&$pre, &$post, &$perGradino, &$coppie, &$blocchi, $conta, $tetti) {
+        // Il DJ scrive nello stesso canale con separatori '=== DJ ... ===' (3 '='),
+        // ma non ha la sezione MESSAGGIO: il match sotto lo scarta da solo.
+        if (!preg_match('/### MESSAGGIO DI (.+?) A CUI DEVI RISPONDERE ###\n(.*?)\n\nRispondi a /s', $b, $mq)) return;
+        if (!preg_match('/\nRISPOSTA(?: \((\d+) parole, budget livello (\d+)\))?:\n(.*)$/s', $b, $mr)) return;
+
+        $domanda  = trim($mq[2]);
+        $risposta = trim($mr[3]);
+        if ($domanda === '' || $risposta === '') return;
+
+        $blocchi++;
+        $q = $conta($domanda);
+        $r = $conta($risposta);
+        $nuovo = ($mr[1] ?? '') !== '';
+        $budget = rispostaBudget($domanda);
+
+        if ($nuovo) {
+            $post[] = ['r' => $r, 'liv' => (int)$mr[2]];
+        } else {
+            $pre[] = $r;
+            $perGradino[$budget['livello']][] = $r;
+            $coppie[] = ['q' => $q, 'r' => $r, 'liv' => $budget['livello'],
+                         'estratto' => mb_substr(preg_replace('/\s+/u', ' ', $domanda), 0, 60)];
+        }
+    };
+
+    while (($l = fgets($fh)) !== false) {
+        if (preg_match('/^={20,}\s*$/', $l)) { $processa($buf); $buf = ''; continue; }
+        $buf .= $l;
+        if (strlen($buf) > 200000) $buf = substr($buf, -100000);  // blocco anomalo: non crescere all'infinito
+    }
+    $processa($buf);
+    fclose($fh);
+
+    // Cosa avrebbe fatto il budget sul comportamento vecchio
+    $gradini = [];
+    foreach ($tetti as $liv => $tetto) {
+        $v = $perGradino[$liv] ?? [];
+        $sforano = count(array_filter($v, fn($x) => $x > $tetto));
+        $gradini[$liv] = diagStats($v) + [
+            'tetto'         => $tetto,
+            'sforerebbero'  => $sforano,
+            'pct_sfora'     => $v ? round(100 * $sforano / count($v)) : null,
+        ];
+    }
+
+    // La premessa del budget e' che domanda lunga => risposta lunga: verifichiamola
+    $corr = null;
+    if (count($coppie) >= 5) {
+        $qs = array_column($coppie, 'q'); $rs = array_column($coppie, 'r');
+        $mq2 = array_sum($qs) / count($qs); $mr2 = array_sum($rs) / count($rs);
+        $num = 0; $dq = 0; $dr = 0;
+        foreach ($qs as $i => $qv) { $num += ($qv - $mq2) * ($rs[$i] - $mr2); $dq += ($qv - $mq2) ** 2; $dr += ($rs[$i] - $mr2) ** 2; }
+        $corr = ($dq > 0 && $dr > 0) ? round($num / sqrt($dq * $dr), 2) : null;
+    }
+
+    usort($coppie, fn($a, $b) => $b['r'] <=> $a['r']);
+    $postR = array_column($post, 'r');
+    $sforaPost = 0;
+    foreach ($post as $p) if ($p['r'] > ($tetti[$p['liv']] ?? 150)) $sforaPost++;
+
+    return [
+        'ok'              => true,
+        'file'            => basename($path),
+        'size_bytes'      => filesize($path),
+        'interazioni'     => $blocchi,
+        'pre_budget'      => diagStats($pre),
+        'post_budget'     => diagStats($postR) + ['sforano_il_tetto' => $sforaPost],
+        'per_gradino'     => $gradini,
+        'correlazione_domanda_risposta' => $corr,
+        'piu_lunghe'      => array_slice($coppie, 0, 10),
+    ];
+}
+
 // --- DISPATCH ---
 $response = match ($mode) {
     'summary'  => diagModeSummary($sinceSec),
@@ -254,8 +387,9 @@ $response = match ($mode) {
                     : diagModeTail($logName, $tailN),
     'errors'   => diagModeErrors($logName, $sinceSec, $tailN),
     'search'   => diagModeSearch($logName, $pattern, $tailN),
+    'lunghezze' => diagModeLunghezze(),
     default    => diagFail(400, 'invalid mode', [
-                    'valid' => ['summary', 'channels', 'tail', 'errors', 'search']
+                    'valid' => ['summary', 'channels', 'tail', 'errors', 'search', 'lunghezze']
                   ]),
 };
 

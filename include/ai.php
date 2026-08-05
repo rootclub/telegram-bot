@@ -884,61 +884,110 @@ function dumpChatContext($groupId) {
 }
 
 /**
+ * La scala dei gradini di lunghezza: soglia di parole della domanda -> tetto.
+ *
+ * Sta in una funzione sua perche' la usa anche diag.php (?mode=lunghezze) per
+ * dire quante risposte storiche sforerebbero ciascun tetto. Duplicare i numeri
+ * la' significava vederli divergere al primo ritocco, e una misura di taratura
+ * che misura una scala diversa da quella in produzione e' peggio di nessuna.
+ *
+ * Tetti tarati il 2026-08-05 su 641 risposte reali estratte da ai.log: la
+ * mediana pre-budget era 148 parole (p25 102, p75 207, p90 313, max 768).
+ * Coi tetti iniziali (15/40/80/150) sforava dal 99% all'85% delle risposte per
+ * gradino: un taglio cosi' uniforme non e' una taratura, e' un bavaglio. Questi
+ * valori lasciano la mediana storica raggiungibile sui gradini alti e
+ * concentrano il taglio sulle chiacchiere brevi, che sono il grosso del volume.
+ *
+ * @return list<array{max:int, testo:string, tetto:int}>
+ */
+function rispostaBudgetScala(): array {
+    // 'max' = parole del messaggio utente fino a cui vale il gradino
+    // 'tetto' = il numero dentro 'testo', in forma usabile dal codice
+    return [
+        ['max' => 4,           'tetto' => 25,  'testo' => 'una riga sola, non piu\' di 25 parole'],
+        ['max' => 15,          'tetto' => 60,  'testo' => '2-3 frasi, non piu\' di 60 parole'],
+        ['max' => 40,          'tetto' => 110, 'testo' => 'un paragrafo, non piu\' di 110 parole'],
+        ['max' => PHP_INT_MAX, 'tetto' => 200, 'testo' => 'quanto serve, ma resta sotto le 200 parole'],
+    ];
+}
+
+/**
  * Quanto deve essere lunga la risposta, dedotto dal messaggio dell'utente.
  *
  * L'unica istruzione sulla lunghezza era "sei diretto e vai al punto, ma quando
  * serve approfondisci senza problemi": la seconda meta' annulla la prima, e il
  * modello in dubbio sceglie sempre di approfondire. Qui la lunghezza diventa un
  * numero esplicito, perche' "sii breve" un LLM lo interpreta come vuole mentre
- * "1-2 frasi, non piu' di 40 parole" lo rispetta.
+ * "2-3 frasi, non piu' di 60 parole" lo rispetta.
  *
- * Il segnale principale e' la lunghezza della domanda: chi scrive tre parole non
- * vuole un paragrafo. E' una proxy grezza — "come funziona il DNS?" e' corta e
- * merita spazio — quindi c'e' un correttivo: se l'utente chiede esplicitamente
- * di spiegare, elencare o approfondire, si sale di un gradino. Il correttivo
- * agisce solo verso l'alto: nessuna parola chiave puo' accorciare una risposta,
- * cosi' il caso peggiore di un falso positivo e' una risposta un po' piu' lunga,
- * non una domanda articolata liquidata in una riga.
+ * Il segnale principale e' la lunghezza della domanda. Attenzione pero': misurato
+ * su 641 interazioni vere, la correlazione fra parole della domanda e parole
+ * della risposta era r = 0.21, cioe' praticamente nulla — il bot rispondeva
+ * lungo a prescindere. Quindi questa scala non descrive un comportamento
+ * esistente, lo prescrive, ed e' il tetto assoluto a fare il lavoro, non la
+ * proporzionalita'. Vale la pena ricordarlo prima di ritoccare i rapporti fra
+ * gradini pensando di assecondare una tendenza naturale che non c'e'.
+ *
+ * Due correttivi, entrambi solo verso l'alto — nessuna parola chiave puo'
+ * accorciare una risposta, cosi' un falso positivo costa al massimo qualche
+ * riga di troppo invece di mutilare una richiesta seria:
+ *
+ * 1. APPROFONDIMENTO (+1 gradino): "spiegami", "elenca", "come funziona".
+ *    "perche'" resta fuori di proposito: in chat e' quasi sempre retorico
+ *    ("e perche' mai?"), e includerlo alzerebbe il budget meta' delle volte.
+ *
+ * 2. PRODUZIONE (gradino massimo): "crea un piano", "scrivi", "sviluppa", e le
+ *    conferme secche che fanno partire un compito deciso prima ("si fai",
+ *    "esegui la richiesta"). Questo correttivo esiste perche' i dati lo hanno
+ *    imposto: le risposte piu' lunghe di sempre nascevano da messaggi
+ *    brevissimi — "Si fai" (2 parole) -> 549 parole, "Esegui la richiesta."
+ *    (3 parole) -> 609, "crea un piano di nutrizione settimanale" -> 615. Li'
+ *    la lunghezza la detta il compito, non il messaggio, e contare le parole
+ *    della domanda e' semplicemente la misura sbagliata: senza questo ramo il
+ *    bot troncherebbe un piano alimentare a 25 parole.
+ *
+ * Il prezzo e' qualche falso positivo ("che fai?" prende il gradino massimo),
+ * accettato perche' il tetto e' un MASSIMO, non un obiettivo: su una domanda
+ * che non ha 200 parole di risposta il modello resta corto comunque. Il motivo
+ * dello scatto finisce in ai.log, cosi' se il rumore fosse troppo si vede.
  *
  * Nessun taglio in PHP: troncare a meta' frase e' peggio di una risposta lunga.
- * Il rispetto del budget si verifica su ai.log, dove finiscono sia il livello
- * chiesto sia le parole effettivamente prodotte.
  *
  * @param string $message Messaggio utente, gia' ripulito dalle menzioni
- * @return array{livello:int, parole:int, testo:string, forzato:bool}
+ * @return array{livello:int, parole:int, testo:string, tetto:int, motivo:string}
  */
 function rispostaBudget(string $message): array {
     $clean = trim($message);
     $parole = preg_split('/\s+/u', $clean, -1, PREG_SPLIT_NO_EMPTY);
     $n = count($parole);
+    $scala = rispostaBudgetScala();
+    $ultimo = count($scala) - 1;
 
-    // 'max' = parole del messaggio utente fino a cui vale il gradino
-    $scala = [
-        ['max' => 4,            'testo' => 'una riga sola, non piu\' di 15 parole'],
-        ['max' => 15,           'testo' => '1-2 frasi, non piu\' di 40 parole'],
-        ['max' => 40,           'testo' => '2-4 frasi, non piu\' di 80 parole'],
-        ['max' => PHP_INT_MAX,  'testo' => 'quanto serve, ma resta sotto le 150 parole'],
-    ];
-
-    $livello = count($scala) - 1;
+    $livello = $ultimo;
     foreach ($scala as $i => $s) {
         if ($n <= $s['max']) { $livello = $i; break; }
     }
 
-    // Richiesta esplicita di approfondimento: vale piu' del conteggio parole.
-    // "perche'" resta fuori di proposito: in chat e' quasi sempre retorico
-    // ("e perche' mai?"), e includerlo alzerebbe il budget meta' delle volte.
+    // Ordine non casuale: produzione vince su approfondimento, perche' e' il
+    // segnale piu' forte dei due e porta comunque al gradino massimo.
+    $produzione = '/(\bcre[ao]\b|\bcreare\b|\bscriv\w+|\bgener\w+|\bsvilupp\w+|\bprepar\w+|\bprogett\w+|\bcompon\w+|\btradu\w+|\briassum\w+|\belabor\w+|\bpiano\b|\bprogramma\b|\bricetta\b|\btabella\b|\bschema\b|\bcodice\b|\bscript\b|\besegu\w+|\bprocedi\b|\bprosegui\b|\bcontinua\b|\bfai\b|\bfammi\b|\bdammi\b)/iu';
     $approfondisci = '/(\bspieg\w+|\bapprofondi\w+|\bdettagl\w+|\belenc\w+|\bracconta\w*|come si fa|come funziona|differenza tra|per esteso|in dettaglio|passo passo)/iu';
-    $forzato = (bool)preg_match($approfondisci, $clean);
-    if ($forzato) {
-        $livello = min($livello + 1, count($scala) - 1);
+
+    $motivo = '';
+    if (preg_match($produzione, $clean)) {
+        $livello = $ultimo;
+        $motivo = 'produzione';
+    } elseif (preg_match($approfondisci, $clean)) {
+        $livello = min($livello + 1, $ultimo);
+        $motivo = 'approfondimento';
     }
 
     return [
         'livello' => $livello,
         'parole'  => $n,
         'testo'   => $scala[$livello]['testo'],
-        'forzato' => $forzato,
+        'tetto'   => $scala[$livello]['tetto'],
+        'motivo'  => $motivo,
     ];
 }
 
@@ -1045,7 +1094,7 @@ PROMPT;
     $logEntry = "\n" . str_repeat('=', 60) . "\n";
     $logEntry .= "[" . date('Y-m-d H:i:s') . "] Utente: {$userName}\n";
     $logEntry .= "BUDGET: livello {$budget['livello']}, domanda di {$budget['parole']} parole"
-        . ($budget['forzato'] ? ' (+1 per richiesta esplicita di approfondimento)' : '')
+        . ($budget['motivo'] !== '' ? " (alzato: {$budget['motivo']})" : '')
         . " -> {$budget['testo']}\n";
     $logEntry .= str_repeat('-', 60) . "\n";
     $logEntry .= $prompt . "\n";
