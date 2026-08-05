@@ -884,6 +884,65 @@ function dumpChatContext($groupId) {
 }
 
 /**
+ * Quanto deve essere lunga la risposta, dedotto dal messaggio dell'utente.
+ *
+ * L'unica istruzione sulla lunghezza era "sei diretto e vai al punto, ma quando
+ * serve approfondisci senza problemi": la seconda meta' annulla la prima, e il
+ * modello in dubbio sceglie sempre di approfondire. Qui la lunghezza diventa un
+ * numero esplicito, perche' "sii breve" un LLM lo interpreta come vuole mentre
+ * "1-2 frasi, non piu' di 40 parole" lo rispetta.
+ *
+ * Il segnale principale e' la lunghezza della domanda: chi scrive tre parole non
+ * vuole un paragrafo. E' una proxy grezza — "come funziona il DNS?" e' corta e
+ * merita spazio — quindi c'e' un correttivo: se l'utente chiede esplicitamente
+ * di spiegare, elencare o approfondire, si sale di un gradino. Il correttivo
+ * agisce solo verso l'alto: nessuna parola chiave puo' accorciare una risposta,
+ * cosi' il caso peggiore di un falso positivo e' una risposta un po' piu' lunga,
+ * non una domanda articolata liquidata in una riga.
+ *
+ * Nessun taglio in PHP: troncare a meta' frase e' peggio di una risposta lunga.
+ * Il rispetto del budget si verifica su ai.log, dove finiscono sia il livello
+ * chiesto sia le parole effettivamente prodotte.
+ *
+ * @param string $message Messaggio utente, gia' ripulito dalle menzioni
+ * @return array{livello:int, parole:int, testo:string, forzato:bool}
+ */
+function rispostaBudget(string $message): array {
+    $clean = trim($message);
+    $parole = preg_split('/\s+/u', $clean, -1, PREG_SPLIT_NO_EMPTY);
+    $n = count($parole);
+
+    // 'max' = parole del messaggio utente fino a cui vale il gradino
+    $scala = [
+        ['max' => 4,            'testo' => 'una riga sola, non piu\' di 15 parole'],
+        ['max' => 15,           'testo' => '1-2 frasi, non piu\' di 40 parole'],
+        ['max' => 40,           'testo' => '2-4 frasi, non piu\' di 80 parole'],
+        ['max' => PHP_INT_MAX,  'testo' => 'quanto serve, ma resta sotto le 150 parole'],
+    ];
+
+    $livello = count($scala) - 1;
+    foreach ($scala as $i => $s) {
+        if ($n <= $s['max']) { $livello = $i; break; }
+    }
+
+    // Richiesta esplicita di approfondimento: vale piu' del conteggio parole.
+    // "perche'" resta fuori di proposito: in chat e' quasi sempre retorico
+    // ("e perche' mai?"), e includerlo alzerebbe il budget meta' delle volte.
+    $approfondisci = '/(\bspieg\w+|\bapprofondi\w+|\bdettagl\w+|\belenc\w+|\bracconta\w*|come si fa|come funziona|differenza tra|per esteso|in dettaglio|passo passo)/iu';
+    $forzato = (bool)preg_match($approfondisci, $clean);
+    if ($forzato) {
+        $livello = min($livello + 1, count($scala) - 1);
+    }
+
+    return [
+        'livello' => $livello,
+        'parole'  => $n,
+        'testo'   => $scala[$livello]['testo'],
+        'forzato' => $forzato,
+    ];
+}
+
+/**
  * Funzione core per generare risposta AI.
  * Chiamata dal dispatcher con eventuale sezione wiki gia' preparata dall'agente enrichment.
  *
@@ -930,9 +989,21 @@ function _ai_core($chatID, $chatType, $message, $userName = 'Utente', $wikiSecti
     // le varie uscite (risposta, saluto, DJ, rassegna) non suonano scollegate fra loro.
     require_once __DIR__ . '/group_memory.php';
     $memoriaGruppo = groupMemorySection((int)$chatID);
+
+    // Le menzioni vanno via prima del budget: "@rootbot ciao" sono due parole per
+    // preg_split ma una sola per l'utente, e sul gradino piu' basso un'unita' pesa.
+    $message = str_replace('@rootbotbot', '', $message);
+    $message = str_replace('rootbotbot', '', $message);
+    $message = str_replace('@rootbot', '', $message);
+    $message = str_replace('@bot', '', $message);
+    $message = str_replace('@root', '', $message);
+    $message = trim($message);
+
+    $budget = rispostaBudget($message);
     $instructions = <<<INSTR
 {$persona}{$memoriaGruppo}
-- Sei diretto e vai al punto, ma quando serve approfondisci senza problemi
+
+Lunghezza della risposta: {$budget['testo']}. Vai dritto al punto: niente premesse, niente riassunto di quello che ti e' stato chiesto, niente chiusa a effetto. Se lo spazio non basta, taglia il contorno e tieni la sostanza.
 
 Info pratiche che conosci:
 - Oggi è {$oggi}, ore {$orario}
@@ -943,12 +1014,6 @@ Info pratiche che conosci:
 - Frequentato da nerd, maker, smanettoni di tecnologia, elettronica, robotica, fantascienza
 INSTR;
     $instructions .= $personalization;
-    $message = str_replace('@rootbotbot', '', $message);
-    $message = str_replace('rootbotbot', '', $message);
-    $message = str_replace('@rootbot', '', $message);
-    $message = str_replace('@bot', '', $message);
-    $message = str_replace('@root', '', $message);
-    $message = trim($message);
 
     // Costruisci sezione conversazione solo se ci sono scambi precedenti
     $conversationSection = '';
@@ -973,11 +1038,15 @@ CONV;
 
 Rispondi a {$userName}. Il contesto gruppo serve per capire di cosa si parla, la conversazione mostra i tuoi scambi precedenti con questo utente.
 IMPORTANTE: Scrivi SOLO la tua risposta, senza prefissi come "rootbot:" o simili.
+La risposta deve stare in: {$budget['testo']}.
 PROMPT;
 
     // Log strutturato
     $logEntry = "\n" . str_repeat('=', 60) . "\n";
     $logEntry .= "[" . date('Y-m-d H:i:s') . "] Utente: {$userName}\n";
+    $logEntry .= "BUDGET: livello {$budget['livello']}, domanda di {$budget['parole']} parole"
+        . ($budget['forzato'] ? ' (+1 per richiesta esplicita di approfondimento)' : '')
+        . " -> {$budget['testo']}\n";
     $logEntry .= str_repeat('-', 60) . "\n";
     $logEntry .= $prompt . "\n";
     file_put_contents(logPath('ai'), $logEntry, FILE_APPEND);
@@ -1012,9 +1081,12 @@ PROMPT;
         $response = mb_substr($response, 0, 4093) . '...';
     }
 
-    // Log risposta
+    // Log risposta. Il conteggio parole sta accanto al budget chiesto sopra: senza
+    // i due numeri affiancati non c'e' modo di sapere se il modello sta obbedendo
+    // o se la scala va ritarata.
+    $paroleRisposta = count(preg_split('/\s+/u', trim($response), -1, PREG_SPLIT_NO_EMPTY));
     $logEntry = str_repeat('-', 60) . "\n";
-    $logEntry .= "RISPOSTA:\n{$response}\n";
+    $logEntry .= "RISPOSTA ({$paroleRisposta} parole, budget livello {$budget['livello']}):\n{$response}\n";
     $logEntry .= str_repeat('=', 60) . "\n";
     file_put_contents(logPath('ai'), $logEntry, FILE_APPEND);
 
