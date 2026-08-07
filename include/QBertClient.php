@@ -3,33 +3,43 @@
  * QBert Client PHP - Client per il gateway QBert
  *
  * Uso:
+ *
  *   $qbert = new QBertClient('https://qbert.example.com', appName: 'my_chatbot');
  *
- *   // Richiesta sincrona (blocca finché non arriva risposta)
+ *   // --- Bloccante: aspetta il risultato (script CLI, cron, worker) ---
  *   $response = $qbert->post('ollama', '/api/generate', ['model' => 'llama3', 'prompt' => 'ciao']);
+ *   echo $response['json']['response'];
  *
  *   // Con nota per il log
  *   $response = $qbert->post('ollama', '/api/generate', ['model' => 'llama3', 'prompt' => 'ciao'], note: 'user_chat');
  *
- *   // Con webhook callback (QBert chiamerà l'URL quando il job è completato)
- *   $result = $qbert->submit('ollama', '/api/generate',
- *       json: ['model' => 'llama3', 'prompt' => 'ciao'],
+ *   // --- Non bloccante + webhook: la modalita' giusta per una web app ---
+ *   // Ritorna appena il gateway accoda il job; il risultato arriva al callback.
+ *   $result = $qbert->postAsync('ollama', '/api/generate',
+ *       ['model' => 'llama3', 'prompt' => 'ciao'],
  *       callbackUrl: 'https://myapp.com/qbert-callback'
  *   );
- *   // QBert chiamerà https://myapp.com/qbert-callback con il risultato
- *
- *   // Solo submit senza callback (per polling manuale)
- *   $result = $qbert->submit('ollama', '/api/generate', ['model' => 'llama3', 'prompt' => 'ciao']);
  *   if ($result['is_ticket']) {
- *       // Polling manuale con $qbert->poll($result['ticket_id'])
+ *       // job accodato: QBert chiamera' il callback quando ha finito
+ *   } else {
+ *       // job gia' finito entro la finestra sync: risposta in $result['json']
+ *       // (il callback viene invocato lo stesso)
  *   }
  *
- *   // Richiesta multipart/form-data (es. voice clone con file audio)
+ *   // Non bloccante senza webhook (polling manuale con $qbert->poll($id))
+ *   $result = $qbert->postAsync('ollama', '/api/generate', ['model' => 'llama3', 'prompt' => 'ciao']);
+ *
+ *   // --- Richiesta multipart/form-data (es. voice clone con file audio) ---
  *   $response = $qbert->post('qwen-tts', '/voice_clone', multipart: [
  *       'text' => 'Ciao mondo',
  *       'language' => 'it',
  *       'audio' => new CURLFile('/path/to/sample.wav', 'audio/wav'),
  *   ]);
+ *
+ * Ogni return di post()/get()/request()/postAsync()/getAsync() contiene sempre
+ * le chiavi status_code / headers / body / body_bytes / json / done / failed,
+ * anche quando la richiesta fallisce (gateway irraggiungibile, timeout,
+ * ticket abbandonato). Vedi ensureResponseShape().
  */
 
 class QBertClient {
@@ -39,13 +49,15 @@ class QBertClient {
 	private float $maxWait;
 	private string $appName;
 
+	const HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
+
 	const PRIORITY_URGENT = 'urgent';
 	const PRIORITY_NORMAL = 'normal';
 	const PRIORITY_LAZY = 'lazy';
 
 	public function __construct(
 		string $baseUrl = 'http://127.0.0.1:1999',
-		float $timeout = 35.0,
+		float $timeout = 40.0,
 		float $pollInterval = 2.0,
 		float $maxWait = 600.0,
 		?string $appName = null
@@ -68,7 +80,8 @@ class QBertClient {
 
 	/**
 	 * Invia richiesta e aspetta il risultato (gestisce ticket automaticamente)
-	 * ATTENZIONE: può bloccare per molto tempo, usare solo in script CLI/worker
+	 * ATTENZIONE: può bloccare per molto tempo, usare solo in script CLI/worker.
+	 * Per una web app usa postAsync()/getAsync().
 	 *
 	 * @param array|null $json Body JSON
 	 * @param array|null $multipart Campi multipart/form-data. Valori possono essere:
@@ -83,9 +96,10 @@ class QBertClient {
 		string $priority = self::PRIORITY_NORMAL,
 		array $headers = [],
 		string $note = '',
-		?array $multipart = null
+		?array $multipart = null,
+		string $workload = ''
 	): array {
-		$result = $this->submit($method, $service, $path, $json, $priority, $headers, note: $note, multipart: $multipart);
+		$result = $this->submit($method, $service, $path, $json, $priority, $headers, note: $note, multipart: $multipart, workload: $workload);
 
 		if (!$result['is_ticket']) {
 			return $result;
@@ -94,31 +108,87 @@ class QBertClient {
 		return $this->waitForTicket($result['ticket_id']);
 	}
 
-	public function get(string $service, string $path, string $priority = self::PRIORITY_NORMAL, string $note = ''): array {
-		return $this->request('GET', $service, $path, null, $priority, note: $note);
+	public function get(string $service, string $path, string $priority = self::PRIORITY_NORMAL, string $note = '', string $workload = ''): array {
+		return $this->request('GET', $service, $path, null, $priority, note: $note, workload: $workload);
 	}
 
-	public function post(string $service, string $path, ?array $json = null, string $priority = self::PRIORITY_NORMAL, string $note = '', ?array $multipart = null): array {
-		return $this->request('POST', $service, $path, $json, $priority, note: $note, multipart: $multipart);
+	public function post(string $service, string $path, ?array $json = null, string $priority = self::PRIORITY_NORMAL, string $note = '', ?array $multipart = null, string $workload = ''): array {
+		return $this->request('POST', $service, $path, $json, $priority, note: $note, multipart: $multipart, workload: $workload);
 	}
 
 	/**
-	 * Invia richiesta senza aspettare - ritorna subito
+	 * POST non bloccante: ritorna appena il gateway ha accodato il job.
 	 *
-	 * Se callbackUrl è specificato, QBert chiamerà quell'URL quando il job è completato.
-	 * Altrimenti, usare poll() per verificare lo stato del ticket.
+	 * È la modalità da usare in una web app. Con $callbackUrl valorizzato QBert
+	 * invia il risultato via webhook (POST) a quell'URL — anche se questo
+	 * processo PHP nel frattempo è morto. Senza callback, tieni il
+	 * $result['ticket_id'] e usa poll().
+	 *
+	 * Nota: il gateway può comunque rispondere sincrono se il job finisce
+	 * entro la finestra sync (~30s); in quel caso $result['is_ticket'] è false
+	 * e la risposta è già in $result['json'] (il webhook parte lo stesso).
+	 */
+	public function postAsync(
+		string $service,
+		string $path,
+		?array $json = null,
+		?string $callbackUrl = null,
+		string $priority = self::PRIORITY_NORMAL,
+		string $note = '',
+		?array $multipart = null,
+		string $workload = ''
+	): array {
+		return $this->submit('POST', $service, $path, $json, $priority,
+			callbackUrl: $callbackUrl, note: $note, multipart: $multipart, workload: $workload);
+	}
+
+	/** Variante GET di postAsync(). */
+	public function getAsync(
+		string $service,
+		string $path,
+		?string $callbackUrl = null,
+		string $priority = self::PRIORITY_NORMAL,
+		string $note = '',
+		string $workload = ''
+	): array {
+		return $this->submit('GET', $service, $path, null, $priority,
+			callbackUrl: $callbackUrl, note: $note, workload: $workload);
+	}
+
+	/**
+	 * Invia richiesta senza aspettare il risultato - ritorna appena il gateway
+	 * ha accodato il job (o subito, se il job è finito entro la finestra sync).
+	 *
+	 * Se callbackUrl è specificato, QBert chiamerà quell'URL quando il job è
+	 * completato. Altrimenti, usare poll() per verificare lo stato del ticket.
+	 *
+	 * Ordine degli argomenti: accetta sia (method, service, path) — la forma
+	 * storica di questo client — sia (service, path[, method]), che è quella
+	 * dei client Python e Node. Le due forme convivono perché il codice
+	 * esistente usa la prima e chi arriva dagli altri client scrive
+	 * istintivamente la seconda; prima, la seconda produceva un
+	 * ArgumentCountError. Se il primo argomento è un verbo HTTP si assume la
+	 * forma storica.
+	 *
+	 *   submit('POST', 'ollama', '/api/generate', json: [...])   // storica
+	 *   submit('ollama', '/api/generate', json: [...])           // Python/Node
+	 *   submit('ollama', '/api/generate', ['prompt' => '...'])   // idem, body posizionale
+	 *   submit('ollama', '/api/tags', 'GET')                     // idem, metodo esplicito
 	 */
 	public function submit(
 		string $method,
 		string $service,
-		string $path,
+		string|array|null $path = null,
 		?array $json = null,
 		string $priority = self::PRIORITY_NORMAL,
 		array $headers = [],
 		?string $callbackUrl = null,
 		string $note = '',
-		?array $multipart = null
+		?array $multipart = null,
+		string $workload = ''
 	): array {
+		[$method, $service, $path, $json] = self::normalizeCallArgs($method, $service, $path, $json);
+
 		if ($json !== null && $multipart !== null) {
 			throw new QBertException('Cannot use both json and multipart in the same request');
 		}
@@ -129,6 +199,9 @@ class QBertClient {
 		if ($note !== '') {
 			$headers['X-Note'] = $note;
 		}
+		if ($workload !== '') {
+			$headers['X-Workload'] = $workload;
+		}
 		if ($callbackUrl !== null) {
 			$headers['X-Callback-Url'] = $callbackUrl;
 		}
@@ -137,6 +210,9 @@ class QBertClient {
 
 		if ($response['status_code'] === 202) {
 			$data = json_decode($response['body'], true);
+			if (!is_array($data) || !isset($data['ticket_id'])) {
+				throw new QBertException('QBert returned 202 without a ticket_id: ' . substr($response['body'], 0, 200));
+			}
 			return [
 				'is_ticket' => true,
 				'ticket_id' => $data['ticket_id'],
@@ -146,14 +222,66 @@ class QBertClient {
 			];
 		}
 
-		return [
+		// Nessuna risposta HTTP (gateway irraggiungibile, DNS, TLS, timeout del
+		// client): status_code 0 sarebbe passato per un successo in qualunque
+		// consumer che testa `>= 400`. Lo mappiamo su un codice parlante e
+		// marchiamo l'esito come fallito, con il messaggio di cURL in 'error'.
+		if ($response['status_code'] === 0) {
+			return $this->ensureResponseShape([
+				'is_ticket' => false,
+				'status_code' => ($response['errno'] ?? 0) === CURLE_OPERATION_TIMEDOUT ? 504 : 502,
+				'done' => false,
+				'failed' => true,
+				'error' => $response['error'] !== '' ? $response['error'] : 'request failed',
+			]);
+		}
+
+		return $this->ensureResponseShape([
 			'is_ticket' => false,
 			'status_code' => $response['status_code'],
 			'headers' => $response['headers'],
 			'body' => $response['body'],
 			'body_bytes' => $response['body'],
 			'json' => $this->tryJsonDecode($response['body']),
-		];
+			// Il backend ha risposto: la richiesta è andata a buon fine dal
+			// punto di vista del trasporto, anche se lo status è 4xx/5xx.
+			'done' => true,
+			'failed' => false,
+		]);
+	}
+
+	/**
+	 * Riconosce quale dei due ordini di argomenti ha usato il chiamante e
+	 * restituisce sempre [$method, $service, $path, $json].
+	 */
+	private static function normalizeCallArgs(string $a, string $b, string|array|null $c, ?array $json): array {
+		$isVerb = static fn($v) => is_string($v) && in_array(strtoupper($v), self::HTTP_METHODS, true);
+
+		if ($c === null) {
+			// submit('ollama', '/api/generate', json: [...])
+			[$method, $service, $path] = ['POST', $a, $b];
+		} elseif (is_array($c)) {
+			// submit('ollama', '/api/generate', ['prompt' => '...'])
+			if ($json !== null) {
+				throw new QBertException('Body passed twice (positional and as $json)');
+			}
+			[$method, $service, $path, $json] = ['POST', $a, $b, $c];
+		} elseif ($isVerb($c) && !$isVerb($a)) {
+			// submit('ollama', '/api/tags', 'GET')
+			[$method, $service, $path] = [$c, $a, $b];
+		} else {
+			// submit('POST', 'ollama', '/api/generate', [...])
+			[$method, $service, $path] = [$a, $b, $c];
+		}
+
+		$method = strtoupper($method);
+		if (!in_array($method, self::HTTP_METHODS, true)) {
+			throw new QBertException(
+				"Invalid HTTP method '{$method}'. Attesi: submit(method, service, path) " .
+				"oppure submit(service, path[, method])."
+			);
+		}
+		return [$method, $service, $path, $json];
 	}
 
 	/**
@@ -284,8 +412,11 @@ class QBertClient {
 
 	/**
 	 * HTTP request con cURL
+	 *
+	 * `protected` e non `private` così i test possono sostituire il livello di
+	 * trasporto e verificare che cosa il client ha effettivamente inviato.
 	 */
-	private function httpRequest(
+	protected function httpRequest(
 		string $method,
 		string $url,
 		?array $json = null,
@@ -340,6 +471,7 @@ class QBertClient {
 		$body = curl_exec($ch);
 		$statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 		$error = curl_error($ch);
+		$errno = curl_errno($ch);
 		curl_close($ch);
 
 		if ($body === false) {
@@ -348,6 +480,7 @@ class QBertClient {
 				'headers' => [],
 				'body' => '',
 				'error' => $error,
+				'errno' => $errno,
 			];
 		}
 
